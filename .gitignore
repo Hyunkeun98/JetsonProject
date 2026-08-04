@@ -2,3 +2,4 @@ Data/
 Model/
 __pycache__/
 *.pyc
+.superpowers/
