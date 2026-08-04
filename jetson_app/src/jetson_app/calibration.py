@@ -42,7 +42,8 @@ class CalibrationBufferWriter:
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
-    def read_all(self) -> list[CalibrationSample]:
+    def _read_all_locked(self) -> list[CalibrationSample]:
+        """Read all samples from file. Caller must already hold self._lock."""
         if not self._path.exists():
             return []
         samples = []
@@ -57,8 +58,13 @@ class CalibrationBufferWriter:
                 )
         return samples
 
+    def read_all(self) -> list[CalibrationSample]:
+        with self._lock:
+            return self._read_all_locked()
+
     def count(self) -> int:
-        return len(self.read_all())
+        with self._lock:
+            return len(self._read_all_locked())
 
     def clear(self) -> None:
         with self._lock:
@@ -66,12 +72,12 @@ class CalibrationBufferWriter:
                 self._path.unlink()
 
     def prune_older_than(self, cutoff: datetime) -> None:
-        kept = [
-            s
-            for s in self.read_all()
-            if datetime.fromisoformat(s.timestamp) >= cutoff
-        ]
         with self._lock:
+            kept = [
+                s
+                for s in self._read_all_locked()
+                if datetime.fromisoformat(s.timestamp) >= cutoff
+            ]
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with self._path.open("w", encoding="utf-8") as f:
                 for s in kept:
