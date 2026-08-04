@@ -1,10 +1,19 @@
 equipment_id: "test_dx1"
 mqtt:
-  subscribe_topic: "dx1/test_dx1/telemetry"
+  subscribe_topics:
+    - "dx1/test_dx1/actuator_1"
+    - "dx1/test_dx1/axis_status_3"
   publish_topic: "jetson/test_dx1/anomaly"
+  command_topic: "jetson/test_dx1/cmd"
 tags:
-  - "servo1:torque"
-  - "servo1:position"
-  - "sensor:A_L_01"
-  # DX1 SpeeDBee JSON Serializer가 실제로 내보내는 "컴포넌트명:데이터명" 형식의
-  # 태그명으로 교체하세요 (Task 6에서 DX1 설정과 맞춥니다).
+  - "PLC_Collector_Actuator_1:AirBlower.Cmd[0]"
+  - "PLC_Collector_Actuator_1:Gripper.Sensor[0]"
+  - "PLC_Collector_Axis_Status_3:AxCV_VelDemVal"
+  - "PLC_Collector_Axis_Status_3:AxX_VelDemVal"
+  # 실제 DX1이 내보내는 "Collector명:신호명" 형식의 태그명으로 채우세요.
+  # PLC 내부 카운터(PosTimestamp 등)는 분석 대상이 아니므로 여기 적지 않습니다.
+resample_interval_ms: 50
+window_size: 100
+calibration:
+  max_duration: "7d"
+  min_samples: 10000

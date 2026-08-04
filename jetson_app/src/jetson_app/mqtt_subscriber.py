@@ -55,6 +55,10 @@ class MqttRecordSubscriber:
         self._client.on_connect = self._handle_connect
         self._client.on_message = self._handle_message
 
+    @property
+    def client(self) -> mqtt.Client:
+        return self._client
+
     def connect(self, host: str, port: int = 1883) -> None:
         self._client.connect(host, port)
 
@@ -68,7 +72,9 @@ class MqttRecordSubscriber:
                 "— 브로커 인증/ACL 설정을 확인하세요"
             )
             return
-        client.subscribe(self._config.subscribe_topic)
+        for topic in self._config.subscribe_topics:
+            client.subscribe(topic)
+        client.subscribe(self._config.command_topic)
 
     def _handle_message(self, client, userdata, msg):
         for record in parse_and_filter_records(msg.payload, self._config.tags):

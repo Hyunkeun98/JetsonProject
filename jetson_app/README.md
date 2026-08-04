@@ -1,10 +1,10 @@
 # jetson_app
 
-Jetson 쪽 실시간 이상탐지 프레임워크의 통신 레이어. DX1(SpeeDBee Synapse)이 MQTT로 Publish하는 설비 태그 데이터를 구독해서 콘솔에 출력한다.
+Jetson 쪽 실시간 이상탐지 프레임워크의 통신 + 데이터 파이프라인 레이어. DX1(SpeeDBee Synapse)이 MQTT로 Publish하는 설비 태그 데이터를 여러 토픽에서 구독해 Tag Buffer에 모으고, 주기적으로 스냅샷을 떠서 슬라이딩 윈도우와 캘리브레이션 버퍼에 쌓는다. MQTT 명령으로 학습(train)/재캘리브레이션(recalibrate) 상태 전이를 제어한다.
 
 전체 설계 배경은 [`../docs/superpowers/specs/2026-07-31-jetson-dx1-anomaly-framework-design.md`](../docs/superpowers/specs/2026-07-31-jetson-dx1-anomaly-framework-design.md), 이 통신 레이어의 구현 계획은 [`../docs/superpowers/plans/2026-08-03-jetson-mqtt-communication-layer.md`](../docs/superpowers/plans/2026-08-03-jetson-mqtt-communication-layer.md) 참고.
 
-현재 범위: 설비 config 로더 + MQTT 파싱/구독자 + CLI 진입점(코드, 유닛테스트 완료). Tag Buffer/Calibration/Inference/Result Publisher는 이후 별도 계획.
+현재 범위: 설비 config 로더(다중 토픽) + MQTT 파싱/구독자 + Tag Buffer/슬라이딩 윈도우 + 주기 스냅샷 스케줄러 + 캘리브레이션 저장/상태머신 + MQTT train/recalibrate 명령 구독자 + CLI 진입점(코드, 유닛테스트 완료). 실제 모델 학습/Inference/Result Publisher는 이후 별도 계획(현재 `train_fn`은 자리표시자).
 
 ## 필요 환경
 
@@ -125,7 +125,7 @@ SpeeDBee Synapse 관리 화면에서:
 2. MQTT Emitter 컴포넌트를 추가한다:
    - Broker Host: 위 1-6에서 확인한 Jetson IP
    - Port: `1883`
-   - Topic: `dx1/test_dx1/telemetry` (`configs/test_dx1.yaml`의 `mqtt.subscribe_topic`과 정확히 일치해야 함)
+   - Topic: `dx1/test_dx1/telemetry` (이 Emitter가 발행할 토픽 하나가 `configs/test_dx1.yaml`의 `mqtt.subscribe_topics`(복수) 목록에 정확히 포함되어 있어야 함)
    - Publish 트리거 활성화
 
 ## 4. 구독자 실행 및 End-to-End 검증
@@ -138,7 +138,25 @@ uv run jetson-app --config configs/test_dx1.yaml --host localhost
 
 (또는 동일하게 `uv run python -m jetson_app.subscriber_cli --config configs/test_dx1.yaml --host localhost`)
 
-시작 시 `[test_dx1] 'dx1/test_dx1/telemetry' 구독 시작 (localhost:1883)`이 출력되고, 이후 DX1이 Publish할 때마다 `[타임스탬프] {태그: 값, ...}` 형태로 실시간 출력되면 성공이다. `Ctrl+C`로 종료할 수 있다.
+시작 시 `[test_dx1] 1개 토픽 구독 시작 (localhost:1883), 캘리브레이션 데이터: calibration_data` 형태의 구독 확인 줄이 출력된다. 이후에는 메시지마다 출력되지 않고, 데이터가 실제로 흐르고 있으면 약 5초에 한 번씩 다음과 같은 하트비트 줄이 찍힌다:
+
+```
+[snapshotter] 100번째 스냅샷 처리, 윈도우 10/10, 캘리브레이션 상태=CALIBRATING
+```
+
+즉 **하트비트 줄이 주기적으로 보이면 정상 동작 중**이고, 구독 확인 줄만 나오고 하트비트가 전혀 안 나오면 아직 태그 값이 하나도 안 들어온 것이다(아래 점검 순서 참고). `Ctrl+C`로 종료할 수 있다.
+
+### 캘리브레이션 데이터 위치와 train/recalibrate 명령
+
+- `--calibration-dir` 플래그로 캘리브레이션 버퍼 저장 위치를 지정한다(기본: `calibration_data`). 설비마다 `<calibration-dir>/<equipment_id>.jsonl` 파일에 스냅샷이 JSON Lines로 쌓인다.
+- 기동 직후 상태는 `CALIBRATING`이며, 정상 데이터가 충분히 쌓이면(`calibration.min_samples` 이상) 아래처럼 `train` 명령을 보내 `MONITORING`으로 전환한다. 다시 캘리브레이션부터 시작하려면 `recalibrate`를 보낸다.
+
+```bash
+mosquitto_pub -h localhost -t "jetson/test_dx1/cmd" -m '{"command": "train"}'
+mosquitto_pub -h localhost -t "jetson/test_dx1/cmd" -m '{"command": "recalibrate"}'
+```
+
+> 주의: 이 명령들에는 절대 `-r`(retain)을 붙이지 않는다. retain된 명령 메시지는 앱이 재접속할 때마다 다시 전달되어 의도치 않게 재실행된다.
 
 ### 문제 발생 시 점검 순서
 
