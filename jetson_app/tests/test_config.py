@@ -46,3 +46,30 @@ def test_load_equipment_config_missing_mqtt_section_raises(tmp_path):
 
     with pytest.raises(ConfigError):
         load_equipment_config(config_path)
+
+
+def test_load_equipment_config_empty_yaml_raises(tmp_path):
+    config_path = tmp_path / "empty.yaml"
+    config_path.write_text("", encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        load_equipment_config(config_path)
+
+
+def test_load_equipment_config_malformed_yaml_raises(tmp_path):
+    config_path = tmp_path / "malformed.yaml"
+    config_path.write_text("{ invalid yaml: [unclosed", encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        load_equipment_config(config_path)
+
+
+def test_load_equipment_config_mqtt_not_mapping_raises(tmp_path):
+    config_path = tmp_path / "bad_mqtt.yaml"
+    config_path.write_text(
+        'equipment_id: "x"\nmqtt: "not a dict"\ntags:\n  - "a"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError):
+        load_equipment_config(config_path)

@@ -19,13 +19,22 @@ class EquipmentConfig:
 
 
 def load_equipment_config(path: str | Path) -> EquipmentConfig:
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        raise ConfigError(f"invalid YAML: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ConfigError("config file must contain a YAML mapping")
 
     for field in ("equipment_id", "mqtt", "tags"):
         if field not in data:
             raise ConfigError(f"missing required field: {field}")
 
     mqtt_section = data["mqtt"]
+    if not isinstance(mqtt_section, dict):
+        raise ConfigError("mqtt section must be a mapping")
+
     for field in ("subscribe_topic", "publish_topic"):
         if field not in mqtt_section:
             raise ConfigError(f"missing required field: mqtt.{field}")
