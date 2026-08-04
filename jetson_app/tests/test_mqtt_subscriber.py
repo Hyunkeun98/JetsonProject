@@ -1,18 +1,22 @@
 import types
+from datetime import timedelta
+from unittest.mock import MagicMock
 
-from jetson_app.config import EquipmentConfig
+from jetson_app.config import CalibrationConfig, EquipmentConfig
 from jetson_app.mqtt_subscriber import MqttRecordSubscriber, Record, parse_and_filter_records
 
 
-def _make_config(**overrides):
-    defaults = dict(
-        equipment_id="test_dx1",
-        subscribe_topic="dx1/test_dx1/telemetry",
-        publish_topic="jetson/test_dx1/anomaly",
-        tags=("servo1:torque", "sensor:A_L_01"),
+def _make_config(subscribe_topics, command_topic="jetson/x/cmd"):
+    return EquipmentConfig(
+        equipment_id="x",
+        subscribe_topics=subscribe_topics,
+        publish_topic="jetson/x/anomaly",
+        command_topic=command_topic,
+        tags=("a",),
+        resample_interval_ms=50,
+        window_size=100,
+        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
     )
-    defaults.update(overrides)
-    return EquipmentConfig(**defaults)
 
 
 class _FakeClient:
@@ -101,42 +105,55 @@ def test_parse_and_filter_records_handles_non_utf8_bytes():
 
 
 def test_handle_connect_subscribes_on_success():
-    config = _make_config()
+    config = _make_config(subscribe_topics=("topic/a",))
     subscriber = MqttRecordSubscriber(config, on_record=lambda record: None)
-    fake_client = _FakeClient()
+    fake_client = MagicMock()
 
     subscriber._handle_connect(fake_client, None, None, 0)
 
-    assert fake_client.subscribed_topics == [config.subscribe_topic]
+    subscribed_topics = {call.args[0] for call in fake_client.subscribe.call_args_list}
+    assert "topic/a" in subscribed_topics
 
 
 def test_handle_connect_does_not_subscribe_on_failure():
-    config = _make_config()
+    config = _make_config(subscribe_topics=("topic/a",))
     subscriber = MqttRecordSubscriber(config, on_record=lambda record: None)
-    fake_client = _FakeClient()
+    fake_client = MagicMock()
 
     subscriber._handle_connect(fake_client, None, None, 5)
 
-    assert fake_client.subscribed_topics == []
+    fake_client.subscribe.assert_not_called()
 
 
 def test_handle_message_delivers_parsed_records_to_on_record():
-    config = _make_config()
+    config = _make_config(subscribe_topics=("topic/a",))
     received: list[Record] = []
     subscriber = MqttRecordSubscriber(config, on_record=received.append)
     fake_client = _FakeClient()
     msg = types.SimpleNamespace(
-        payload=(
-            b'{"records": [{"timestamp": "2026-08-03T00:00:00Z", '
-            b'"servo1:torque": 12.3, "sensor:A_L_01": 110.2}]}'
-        )
+        payload=b'{"records": [{"timestamp": "2026-08-03T00:00:00Z", "a": 12.3}]}'
     )
 
     subscriber._handle_message(fake_client, None, msg)
 
     assert received == [
-        Record(
-            timestamp="2026-08-03T00:00:00Z",
-            values={"servo1:torque": 12.3, "sensor:A_L_01": 110.2},
-        )
+        Record(timestamp="2026-08-03T00:00:00Z", values={"a": 12.3})
     ]
+
+
+def test_handle_connect_subscribes_to_all_configured_topics():
+    config = _make_config(subscribe_topics=("topic/a", "topic/b"))
+    subscriber = MqttRecordSubscriber(config, on_record=lambda r: None)
+    fake_client = MagicMock()
+
+    subscriber._handle_connect(fake_client, None, None, 0)
+
+    subscribed_topics = {call.args[0] for call in fake_client.subscribe.call_args_list}
+    assert subscribed_topics == {"topic/a", "topic/b", "jetson/x/cmd"}
+
+
+def test_client_property_exposes_underlying_paho_client():
+    config = _make_config(subscribe_topics=("topic/a",))
+    subscriber = MqttRecordSubscriber(config, on_record=lambda r: None)
+
+    assert subscriber.client is subscriber._client
