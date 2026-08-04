@@ -1,0 +1,10 @@
+equipment_id: "test_dx1"
+mqtt:
+  subscribe_topic: "dx1/test_dx1/telemetry"
+  publish_topic: "jetson/test_dx1/anomaly"
+tags:
+  - "servo1:torque"
+  - "servo1:position"
+  - "sensor:A_L_01"
+  # DX1 SpeeDBee JSON Serializer가 실제로 내보내는 "컴포넌트명:데이터명" 형식의
+  # 태그명으로 교체하세요 (Task 6에서 DX1 설정과 맞춥니다).
