@@ -31,6 +31,9 @@ def build_pipeline(
     sliding_window = SlidingWindow(config.window_size)
 
     buffer_path = Path(calibration_dir) / f"{config.equipment_id}.jsonl"
+    # 잘못된 --calibration-dir이 백그라운드 스레드가 아니라 기동 시점에 드러나도록
+    # 디렉터리를 미리 만든다 (CLI의 OSError 처리에 걸린다).
+    buffer_path.parent.mkdir(parents=True, exist_ok=True)
     buffer_writer = CalibrationBufferWriter(buffer_path)
     calibration_manager = CalibrationManager(
         buffer_writer=buffer_writer,

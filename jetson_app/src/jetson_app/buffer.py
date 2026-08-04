@@ -42,6 +42,10 @@ class SlidingWindow:
         self._window_size = window_size
         self._items: deque[Snapshot] = deque(maxlen=window_size)
 
+    @property
+    def window_size(self) -> int:
+        return self._window_size
+
     def push(self, snapshot: Snapshot) -> None:
         self._items.append(snapshot)
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import Callable, List
 
 from .buffer import Snapshot
 
@@ -52,10 +52,13 @@ class CalibrationBufferWriter:
                 line = line.strip()
                 if not line:
                     continue
-                data = json.loads(line)
-                samples.append(
-                    CalibrationSample(timestamp=data["timestamp"], values=data["values"])
-                )
+                try:
+                    data = json.loads(line)
+                    samples.append(
+                        CalibrationSample(timestamp=data["timestamp"], values=data["values"])
+                    )
+                except (ValueError, KeyError, TypeError) as e:
+                    print(f"[CalibrationBufferWriter] 손상된 캘리브레이션 레코드 무시: {e}")
         return samples
 
     def read_all(self) -> list[CalibrationSample]:
@@ -73,18 +76,21 @@ class CalibrationBufferWriter:
 
     def prune_older_than(self, cutoff: datetime) -> None:
         with self._lock:
+            all_samples = self._read_all_locked()
             kept = [
-                s
-                for s in self._read_all_locked()
-                if datetime.fromisoformat(s.timestamp) >= cutoff
+                s for s in all_samples if datetime.fromisoformat(s.timestamp) >= cutoff
             ]
+            if len(kept) == len(all_samples):
+                return  # 만료된 샘플이 없으면 파일 재작성 자체를 건너뛴다
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            with self._path.open("w", encoding="utf-8") as f:
+            tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
                 for s in kept:
                     f.write(json.dumps({"timestamp": s.timestamp, "values": s.values}) + "\n")
+            tmp_path.replace(self._path)
 
 
-TrainFn = Callable[[list[CalibrationSample]], None]
+TrainFn = Callable[[List[CalibrationSample]], None]
 
 
 class CalibrationManager:

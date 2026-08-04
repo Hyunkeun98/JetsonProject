@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from .calibration import CalibrationError, CalibrationManager
+from .calibration import CalibrationManager
 
 _VALID_COMMANDS = {"train", "recalibrate"}
 
@@ -43,5 +43,6 @@ class CommandSubscriber:
             else:
                 self._calibration_manager.handle_recalibrate_command()
                 print("재캘리브레이션 — CALIBRATING 상태로 재시작")
-        except CalibrationError as e:
+        except Exception as e:
+            # 어떤 예외도 MQTT 루프를 죽여서는 안 된다.
             print(f"명령 처리 실패: {e}")
