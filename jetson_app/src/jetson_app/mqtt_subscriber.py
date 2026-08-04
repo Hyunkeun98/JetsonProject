@@ -17,11 +17,19 @@ class Record:
 
 def parse_and_filter_records(payload: bytes, tags: tuple[str, ...]) -> list[Record]:
     tag_set = set(tags)
-    data = json.loads(payload)
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+
     records = data.get("records", [])
+    if not isinstance(records, list):
+        return []
 
     result = []
     for raw in records:
+        if not isinstance(raw, dict):
+            continue
         timestamp = raw.get("timestamp")
         values = {k: v for k, v in raw.items() if k in tag_set}
         if timestamp is not None and values:

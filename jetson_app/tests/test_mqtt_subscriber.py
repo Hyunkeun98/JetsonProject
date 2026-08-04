@@ -36,3 +36,27 @@ def test_parse_and_filter_records_handles_multiple_records():
     records = parse_and_filter_records(payload, tags=("servo1:torque",))
 
     assert [r.timestamp for r in records] == ["t1", "t2"]
+
+
+def test_parse_and_filter_records_handles_malformed_json():
+    payload = b"not json"
+
+    records = parse_and_filter_records(payload, tags=("servo1:torque",))
+
+    assert records == []
+
+
+def test_parse_and_filter_records_handles_records_not_a_list():
+    payload = b'{"records": null}'
+
+    records = parse_and_filter_records(payload, tags=("servo1:torque",))
+
+    assert records == []
+
+
+def test_parse_and_filter_records_skips_non_dict_items_in_records():
+    payload = b'{"records": ["not a dict", {"timestamp": "t1", "servo1:torque": 1.0}]}'
+
+    records = parse_and_filter_records(payload, tags=("servo1:torque",))
+
+    assert records == [Record(timestamp="t1", values={"servo1:torque": 1.0})]
