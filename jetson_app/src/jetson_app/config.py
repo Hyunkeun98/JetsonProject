@@ -20,7 +20,12 @@ class EquipmentConfig:
 
 def load_equipment_config(path: str | Path) -> EquipmentConfig:
     try:
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigError(f"cannot read config file {path}: {e}") from e
+
+    try:
+        data = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise ConfigError(f"invalid YAML: {e}") from e
 

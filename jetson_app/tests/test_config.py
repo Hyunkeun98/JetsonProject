@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from jetson_app.config import ConfigError, load_equipment_config
@@ -73,3 +75,18 @@ def test_load_equipment_config_mqtt_not_mapping_raises(tmp_path):
 
     with pytest.raises(ConfigError):
         load_equipment_config(config_path)
+
+
+def test_load_equipment_config_missing_file_raises_config_error(tmp_path):
+    missing_path = tmp_path / "does_not_exist.yaml"
+
+    with pytest.raises(ConfigError):
+        load_equipment_config(missing_path)
+
+
+def test_load_equipment_config_loads_shipped_example_config():
+    example_path = Path(__file__).resolve().parent.parent / "configs" / "test_dx1.example.yaml"
+
+    config = load_equipment_config(example_path)
+
+    assert config.tags != ()

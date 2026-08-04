@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
-from .config import load_equipment_config
+from .config import ConfigError, load_equipment_config
 from .mqtt_subscriber import MqttRecordSubscriber, Record
 
 
@@ -17,12 +18,19 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=1883)
     args = parser.parse_args()
 
-    config = load_equipment_config(args.config)
-    subscriber = MqttRecordSubscriber(config, on_record=_print_record)
-    subscriber.connect(args.host, args.port)
+    try:
+        config = load_equipment_config(args.config)
+        subscriber = MqttRecordSubscriber(config, on_record=_print_record)
+        subscriber.connect(args.host, args.port)
+    except (ConfigError, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        raise SystemExit(2)
 
     print(f"[{config.equipment_id}] '{config.subscribe_topic}' 구독 시작 ({args.host}:{args.port})")
-    subscriber.loop_forever()
+    try:
+        subscriber.loop_forever()
+    except KeyboardInterrupt:
+        print("\n중단됨")
 
 
 if __name__ == "__main__":

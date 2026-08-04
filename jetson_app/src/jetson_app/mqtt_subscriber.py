@@ -19,7 +19,13 @@ def parse_and_filter_records(payload: bytes, tags: tuple[str, ...]) -> list[Reco
     tag_set = set(tags)
     try:
         data = json.loads(payload)
-    except json.JSONDecodeError:
+    except ValueError:
+        # json.JSONDecodeError (malformed JSON) and UnicodeDecodeError
+        # (non-UTF8 bytes, raised while json.loads decodes payload) are
+        # both ValueError subclasses.
+        return []
+
+    if not isinstance(data, dict):
         return []
 
     records = data.get("records", [])
@@ -56,6 +62,12 @@ class MqttRecordSubscriber:
         self._client.loop_forever()
 
     def _handle_connect(self, client, userdata, flags, rc):
+        if rc != 0:
+            print(
+                f"[{self._config.equipment_id}] MQTT 연결 실패 (rc={rc}) "
+                "— 브로커 인증/ACL 설정을 확인하세요"
+            )
+            return
         client.subscribe(self._config.subscribe_topic)
 
     def _handle_message(self, client, userdata, msg):
