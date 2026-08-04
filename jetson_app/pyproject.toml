@@ -2,11 +2,10 @@
 name = "jetson-app"
 version = "0.1.0"
 description = "Add your description here"
-readme = "README.md"
 authors = [
     { name = "Hyunkeun98", email = "202945727+Hyunkeun98@users.noreply.github.com" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.8"
 dependencies = [
     "paho-mqtt<2",
     "pyyaml>=6.0.3",
@@ -21,5 +20,5 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "pytest>=9.1.1",
+    "pytest>=7,<8",
 ]
