@@ -1,7 +1,8 @@
 [project]
 name = "jetson-app"
 version = "0.1.0"
-description = "Add your description here"
+description = "DX1 -> Jetson MQTT telemetry subscriber (communication layer)"
+readme = "README.md"
 authors = [
     { name = "Hyunkeun98", email = "202945727+Hyunkeun98@users.noreply.github.com" }
 ]
