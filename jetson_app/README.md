@@ -153,7 +153,7 @@ uv run jetson-app --config configs/test_dx1.yaml --host localhost
 
 (또는 동일하게 `uv run python -m jetson_app.subscriber_cli --config configs/test_dx1.yaml --host localhost`)
 
-시작 시 `[test_dx1] 1개 토픽 구독 시작 (localhost:1883), 캘리브레이션 데이터: calibration_data` 형태의 구독 확인 줄이 출력된다. 이후에는 메시지마다 출력되지 않고, 데이터가 실제로 흐르고 있으면 약 5초에 한 번씩 다음과 같은 하트비트 줄이 찍힌다:
+시작 시 `[test_dx1] 1개 토픽 구독 시작 (localhost:1883), 캘리브레이션 데이터: calibration_data, 모델 저장 위치: model_data` 형태의 구독 확인 줄이 출력된다. 이후에는 메시지마다 출력되지 않고, 데이터가 실제로 흐르고 있으면 약 5초에 한 번씩 다음과 같은 하트비트 줄이 찍힌다:
 
 ```
 [snapshotter] 100번째 스냅샷 처리, 윈도우 10/10, 캘리브레이션 상태=CALIBRATING
@@ -172,7 +172,14 @@ mosquitto_pub -h localhost -t "jetson/test_dx1/cmd" -m '{"command": "recalibrate
 ```
 
 - `--model-dir` 플래그로 학습된 모델을 저장할 위치를 지정한다(기본: `model_data`). `train` 명령이 성공하면 `<model-dir>/<equipment_id>.pt`에 GRU 가중치 + 정규화 통계 + 태그 타입 + 오차 분포 통계가 함께 저장된다.
-- `train` 명령은 이제 실제로 PyTorch GRU 모델을 학습한다(캘리브레이션 샘플 수·태그 수에 따라 CPU에서 수 초~수십 초 소요될 수 있다). 학습이 끝나기 전까지는 다른 MQTT 명령 처리가 지연될 수 있다.
+- `train` 명령은 이제 실제로 PyTorch GRU 모델을 학습한다. **학습은 수 분 단위로 걸린다** — 예제 config 규모(`min_samples: 10000`, `window_size: 100`, 기본 `hidden_size=64`, `num_layers=2`, `epochs=20`)에서 x86 개발 PC CPU 기준 약 **9분**이 걸렸고, Jetson CPU에서는 더 느리다. 캘리브레이션 버퍼가 아무리 커도 학습에는 가장 최근 20,000 샘플만 사용한다(`train_model`/`make_train_fn`의 `max_training_samples`) — 7일치 버퍼를 통째로 윈도잉하면 메모리가 GB 단위로 튀어 Jetson에서 OOM이 나기 때문이다.
+
+  이 학습은 현재 **MQTT 네트워크 스레드 위에서 동기로** 돈다. 그래서 학습이 도는 수 분 동안:
+
+  - `MqttRecordSubscriber`가 `loop_forever()`를 돌리던 그 스레드가 막히므로, paho 기본 keepalive(60초)를 넘겨 브로커가 연결을 끊는다. 학습이 끝나면 자동으로 재접속 + 재구독되어 스스로 복구되지만, 끊긴 동안 DX1이 발행한 텔레메트리는 QoS 0이라 그대로 유실된다.
+  - `CalibrationManager.handle_train_command`가 학습 내내 락을 잡고 있어서 백그라운드 스냅샷 스레드도 함께 멈춘다 — 하트비트 줄도, 윈도우 갱신도 그동안 나오지 않는다.
+
+  즉 학습 중 콘솔이 조용하고 잠깐 연결이 끊겼다 붙는 것은 **현재 구조상 정상 동작**이다. 학습을 네트워크 스레드 밖(별도 워커 스레드/프로세스)으로 빼는 것은 다음 계획의 범위다.
 
 > 주의: 이 명령들에는 절대 `-r`(retain)을 붙이지 않는다. retain된 명령 메시지는 앱이 재접속할 때마다 다시 전달되어 의도치 않게 재실행된다.
 

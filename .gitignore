@@ -1,5 +1,7 @@
 Data/
 Model/
+calibration_data/
+model_data/
 __pycache__/
 *.pyc
 .superpowers/
