@@ -141,3 +141,40 @@ def test_make_train_fn_trains_and_saves(tmp_path: Path):
     assert model_path.exists()
     loaded = load_artifact(model_path)
     assert loaded.tags == ("a", "b")
+
+
+import torch
+
+from jetson_app.model import AnomalyGRU
+from jetson_app.training import compute_raw_errors, model_artifact_path, normalize_continuous_columns
+
+
+def test_normalize_continuous_columns_only_touches_continuous_indices():
+    # tags=(cont, binary): index 0만 정규화 대상
+    X = torch.tensor([[[10.0, 0.0], [20.0, 1.0]]])  # shape (1, 2, 2)
+    y = torch.tensor([[30.0, 1.0]])
+    norm_stats = {"cont": (10.0, 5.0)}
+    normalize_continuous_columns(X, y, ("cont", "binary"), [0], norm_stats)
+    assert torch.allclose(X[:, :, 0], torch.tensor([[0.0, 2.0]]))
+    assert torch.allclose(X[:, :, 1], torch.tensor([[0.0, 1.0]]))  # binary 열은 그대로
+    assert torch.allclose(y[:, 0], torch.tensor([4.0]))
+    assert torch.allclose(y[:, 1], torch.tensor([1.0]))  # binary 열은 그대로
+
+
+def test_compute_raw_errors_shapes_and_non_negative():
+    model = AnomalyGRU(
+        num_tags=2, continuous_indices=[0], binary_indices=[1], hidden_size=4, num_layers=1
+    )
+    X = torch.randn(3, 2, 2)
+    y = torch.randn(3, 2)
+    errors = compute_raw_errors(model, X, y, ("cont", "binary"), [0], [1], batch_size=2)
+    assert set(errors.keys()) == {"cont", "binary"}
+    assert errors["cont"].shape == (3,)
+    assert errors["binary"].shape == (3,)
+    assert torch.all(errors["cont"] >= 0)
+    assert torch.all(errors["binary"] >= 0)
+
+
+def test_model_artifact_path_builds_expected_path():
+    path = model_artifact_path("model_data", "line_A")
+    assert path == Path("model_data") / "line_A.pt"

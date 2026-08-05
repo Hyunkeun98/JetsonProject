@@ -8,7 +8,7 @@ from torch import nn
 
 from .calibration import CalibrationSample, TrainFn
 from .model import AnomalyGRU
-from .tag_stats import TagType, compute_normalization_stats, detect_tag_types
+from .tag_stats import compute_normalization_stats, detect_tag_types, type_indices
 from .windowing import build_windows
 
 DEFAULT_HIDDEN_SIZE = 64
@@ -50,9 +50,8 @@ def train_model(
 
     tag_types = detect_tag_types(samples, tags)
     norm_stats = compute_normalization_stats(samples, tags, tag_types)
-
-    continuous_indices = [i for i, t in enumerate(tags) if tag_types[t] == TagType.CONTINUOUS]
-    binary_indices = [i for i, t in enumerate(tags) if tag_types[t] == TagType.BINARY]
+    tag_types_str = {t: tag_types[t].value for t in tags}
+    continuous_indices, binary_indices = type_indices(tags, tag_types_str)
 
     X, y = build_windows(samples, tags, window_size)
     if X.shape[0] == 0:
@@ -71,11 +70,8 @@ def train_model(
             f"(have {len(samples)} samples, need > {window_size})"
         )
 
-    for idx in continuous_indices:
-        tag = tags[idx]
-        stats = norm_stats[tag]
-        X[:, :, idx] = (X[:, :, idx] - stats.mean) / stats.std
-        y[:, idx] = (y[:, idx] - stats.mean) / stats.std
+    norm_stats_tuples = {t: (s.mean, s.std) for t, s in norm_stats.items()}
+    normalize_continuous_columns(X, y, tags, continuous_indices, norm_stats_tuples)
 
     model = AnomalyGRU(
         num_tags=len(tags),
@@ -115,14 +111,31 @@ def train_model(
 
     return ModelArtifact(
         tags=tags,
-        tag_types={t: tag_types[t].value for t in tags},
-        norm_stats={t: (s.mean, s.std) for t, s in norm_stats.items()},
+        tag_types=tag_types_str,
+        norm_stats=norm_stats_tuples,
         error_stats=error_stats,
         window_size=window_size,
         hidden_size=hidden_size,
         num_layers=num_layers,
         state_dict=model.state_dict(),
     )
+
+
+def normalize_continuous_columns(
+    X: torch.Tensor,
+    y: torch.Tensor,
+    tags: tuple[str, ...],
+    continuous_indices: list[int],
+    norm_stats: dict[str, tuple[float, float]],
+) -> None:
+    """continuous_indices에 해당하는 열을 (값-평균)/표준편차로 정규화한다(in-place).
+    binary 열은 건드리지 않는다. 학습(train_model)과 실시간 추론(inference.py) 양쪽이
+    반드시 동일한 정규화를 쓰도록 공유한다."""
+    for idx in continuous_indices:
+        tag = tags[idx]
+        mean, std = norm_stats[tag]
+        X[:, :, idx] = (X[:, :, idx] - mean) / std
+        y[:, idx] = (y[:, idx] - mean) / std
 
 
 def _floor_std(mean: float, std: float) -> float:
@@ -133,7 +146,7 @@ def _floor_std(mean: float, std: float) -> float:
     return std if std > floor else floor
 
 
-def _compute_error_stats(
+def compute_raw_errors(
     model: AnomalyGRU,
     X: torch.Tensor,
     y: torch.Tensor,
@@ -141,9 +154,11 @@ def _compute_error_stats(
     continuous_indices: list[int],
     binary_indices: list[int],
     batch_size: int = DEFAULT_BATCH_SIZE,
-) -> dict[str, tuple[float, float]]:
-    """학습 완료 후 캘리브레이션 데이터 전체에 대한 태그별 "정상 오차" 평균/표준편차.
-    실시간 이상 점수 계산(다음 계획)에서 원본 오차를 재정규화하는 기준으로 쓰인다.
+) -> dict[str, torch.Tensor]:
+    """정규화된 X(윈도우 배치)로 다음 시점을 예측하고, 정규화된 실제값 y와의 절대오차를
+    태그별로 반환한다(태그당 shape (n,) 텐서, n=배치 크기). 학습 시 "정상 오차" 통계
+    산출(_compute_error_stats)과 실시간 추론(inference.py)의 단일 샘플 오차 계산이
+    이 함수를 공유한다 — 두 곳에서 예측/오차 수식이 어긋나지 않도록 하기 위함이다.
     전체 X를 한 번에 forward하면 메모리가 무제한으로 커지므로 batch_size 단위로 나눠 돈다."""
     model.eval()
     continuous_chunks: list[torch.Tensor] = []
@@ -164,6 +179,21 @@ def _compute_error_stats(
     for pos, idx in enumerate(binary_indices):
         pred_prob = torch.sigmoid(binary_logits[:, pos])
         errors[tags[idx]] = torch.abs(y[:, idx] - pred_prob)
+    return errors
+
+
+def _compute_error_stats(
+    model: AnomalyGRU,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    tags: tuple[str, ...],
+    continuous_indices: list[int],
+    binary_indices: list[int],
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> dict[str, tuple[float, float]]:
+    """학습 완료 후 캘리브레이션 데이터 전체에 대한 태그별 "정상 오차" 평균/표준편차.
+    실시간 이상 점수 계산(inference.py)에서 원본 오차를 재정규화하는 기준으로 쓰인다."""
+    errors = compute_raw_errors(model, X, y, tags, continuous_indices, binary_indices, batch_size)
 
     result: dict[str, tuple[float, float]] = {}
     for tag, err in errors.items():
@@ -235,3 +265,7 @@ def make_train_fn(
         save_artifact(model_path, artifact)
 
     return _train_fn
+
+
+def model_artifact_path(model_dir: str | Path, equipment_id: str) -> Path:
+    return Path(model_dir) / f"{equipment_id}.pt"
