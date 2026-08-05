@@ -1,7 +1,8 @@
 # Jetson 실시간 이상탐지 프레임워크 설계
 
-- Status: Approved (design), pending implementation plan
+- Status: Approved (design), Phase 1 구현 진행 중
 - Date: 2026-07-31
+- 구현 진척도(2026-08-05 기준): 아래 1절 아키텍처 표, 7절 로드맵 표에 컴포넌트/Phase별 상태 표시. 상세 설계는 [`2026-08-04-jetson-anomaly-inference-pipeline-design.md`](2026-08-04-jetson-anomaly-inference-pipeline-design.md) 참고.
 
 ## 배경 및 목표
 
@@ -31,18 +32,21 @@ DX1(OMRON Data Flow Controller, SpeeDBee Synapse 내장)이 현장 설비(PLC/�
           │  MQTT (JSON)
           ▼
 [Jetson] 실시간 추론 프레임워크
-   1. MQTT Subscriber   — 설비별 config에 정의된 태그만 필터링/수신
-   2. Tag Buffer        — 설비별로 태그값을 슬라이딩 윈도우로 버퍼링
-   3. Calibration Manager — 설비 최초 가동 시 일정 기간을 "정상"으로 간주,
-                            그 구간 데이터로 예측 모델을 학습·고정
-   4. Inference Engine  — 실시간 윈도우로 다음 시점 값을 예측 → 실제값과의
+   1. MQTT Subscriber   — 설비별 config에 정의된 태그만 필터링/수신               ✅ 완료
+   2. Tag Buffer        — 설비별로 태그값을 슬라이딩 윈도우로 버퍼링              ✅ 완료
+   3. Calibration Manager — 설비 최초 가동 시 일정 기간을 "정상"으로 간주,        ✅ 완료
+                            그 구간 데이터로 예측 모델을 학습·고정              (PyTorch GRU 학습/저장/로드까지 포함)
+   4. Inference Engine  — 실시간 윈도우로 다음 시점 값을 예측 → 실제값과의        ⬜ 미착수
                           오차(prediction error)를 이상 점수로 환산
-   5. Result Publisher  — 이상 점수/알람(및 하위 분석 결과)을 다시 MQTT로 Publish
+   5. Result Publisher  — 이상 점수/알람(및 하위 분석 결과)을 다시 MQTT로 Publish  ⬜ 미착수
           │
           │  MQTT (JSON, 이상 점수/알람)
           ▼
 [DX1] MQTT Collector → 대시보드/기존 패키지에 통합
 ```
+
+> **범례**: ✅ 완료 (코드+테스트 merge됨) · 🔶 부분 완료 · ⬜ 미착수 · 🔒 실기 필요(하드웨어 없어 검증 보류)
+> MQTT Subscriber는 코드는 완료됐으나 실제 DX1/Mosquitto 연결 검증은 🔒(실기 없음, 수동 가이드만 문서화 — `jetson_app/README.md` 1·3·4절).
 
 **설계 원칙**: 설비별로 독립된 파이프라인(설비마다 별도 config, 별도 모델 상태)을 유지하되, 도루코 스크립트의
 하드코딩된 공차 규칙(`IS_NG` 판정) 같은 설비 전용 로직은 두지 않는다. 새 설비를 붙이는 데 필요한 건 config
@@ -133,12 +137,12 @@ calibration:
 1차 구현 이후, 아래 순서로 단계적으로 확장한다. 순서는 "기존 모델/파이프라인 재사용도가 높은 것부터"
 기준으로 정렬했다.
 
-| 단계 | 기능 | 개요 | 비고 |
-|---|---|---|---|
-| Phase 1 | 핵심 이상탐지 엔진 | 1~6절에 기술된 센서/서보모터 태그 기반 LSTM/GRU 예측 + 이상 점수 | 최초 구현 대상 |
-| Phase 2 | 기여도 분석 | 이상 점수 급등 시 어떤 태그가 가장 크게 벗어났는지 태그별 오차를 랭킹화 (`top_deviant_tag` 등) | Phase 1 모델의 태그별 오차를 그대로 재사용 — 추가 모델 불필요 |
-| Phase 3 | 잔존수명(RUL) 추정 | 예측 오차의 시간적 추세를 외삽해 "언제쯤 임계치를 넘을 것으로 보이는지" 회귀 예측 | Phase 1 모델의 출력(오차 시계열)을 입력으로 하는 별도 회귀 컴포넌트 필요 |
-| Phase 4 | 비전 기반 결함 탐지 | DX1의 IP카메라 + Event-triggered Video Logging Package와 연동해 Jetson GPU에서 CNN 기반 시각 결함 탐지 수행, 센서 이상탐지와 시점 연계 | 새로운 데이터 모달리티(영상) + 새 모델 타입 — 범위가 가장 큼. 별도 설계 필요 |
+| 단계 | 기능 | 개요 | 비고 | 상태 |
+|---|---|---|---|---|
+| Phase 1 | 핵심 이상탐지 엔진 | 1~6절에 기술된 센서/서보모터 태그 기반 LSTM/GRU 예측 + 이상 점수 | 최초 구현 대상 | 🔶 진행 중 — 통신 레이어/데이터 파이프라인/모델 레이어 완료, 실시간 추론 통합(Inference Engine+Result Publisher)만 남음 |
+| Phase 2 | 기여도 분석 | 이상 점수 급등 시 어떤 태그가 가장 크게 벗어났는지 태그별 오차를 랭킹화 (`top_deviant_tag` 등) | Phase 1 모델의 태그별 오차를 그대로 재사용 — 추가 모델 불필요 | ⬜ 미착수 |
+| Phase 3 | 잔존수명(RUL) 추정 | 예측 오차의 시간적 추세를 외삽해 "언제쯤 임계치를 넘을 것으로 보이는지" 회귀 예측 | Phase 1 모델의 출력(오차 시계열)을 입력으로 하는 별도 회귀 컴포넌트 필요 | ⬜ 미착수 |
+| Phase 4 | 비전 기반 결함 탐지 | DX1의 IP카메라 + Event-triggered Video Logging Package와 연동해 Jetson GPU에서 CNN 기반 시각 결함 탐지 수행, 센서 이상탐지와 시점 연계 | 새로운 데이터 모달리티(영상) + 새 모델 타입 — 범위가 가장 큼. 별도 설계 필요 | ⬜ 미착수 |
 
 Phase 2~4는 각각 착수 시점에 별도 브레인스토밍/설계를 거친다 (특히 Phase 4는 카메라 하드웨어 구성과
 DX1 Event-triggered Video Logging Package 연동 방식을 별도로 다뤄야 한다).
