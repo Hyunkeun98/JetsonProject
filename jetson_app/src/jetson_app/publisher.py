@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import paho.mqtt.client as mqtt
+
 
 class ResultPublisher:
     """이상 점수/알람/최대 기여 태그를 상위 아키텍처 문서 3절의 발행 스키마로
@@ -26,4 +28,8 @@ class ResultPublisher:
                 ]
             }
         )
-        self._client.publish(self._publish_topic, payload)
+        # QoS 0(paho 기본)에서는 재연결 중 발행이 조용히 버려진다(rc=MQTT_ERR_NO_CONN).
+        # 알람 경로가 흔적 없이 유실되지 않도록 rc를 확인해 로그를 남긴다.
+        result = self._client.publish(self._publish_topic, payload)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            print(f"[ResultPublisher] 발행 실패 (rc={result.rc}): topic={self._publish_topic}")

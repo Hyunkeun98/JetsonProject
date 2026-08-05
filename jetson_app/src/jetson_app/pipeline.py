@@ -7,6 +7,7 @@ from .buffer import SlidingWindow, TagBuffer
 from .calibration import (
     CalibrationBufferWriter,
     CalibrationManager,
+    CalibrationSample,
     CalibrationState,
     StateStore,
     TrainFn,
@@ -18,7 +19,7 @@ from .inference import ActiveModelHolder, InferenceEngine
 from .mqtt_subscriber import MqttRecordSubscriber, Record
 from .publisher import ResultPublisher
 from .scheduler import PeriodicSnapshotter
-from .training import load_artifact, model_artifact_path
+from .training import ModelArtifact, load_artifact, model_artifact_path, state_marker_path
 
 
 @dataclass(frozen=True)
@@ -57,17 +58,34 @@ def build_pipeline(
     buffer_writer = CalibrationBufferWriter(buffer_path)
 
     model_path = model_artifact_path(model_dir, config.equipment_id)
-    state_path = Path(model_dir) / f"{config.equipment_id}.state"
+    state_path = state_marker_path(model_dir, config.equipment_id)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_store = StateStore(state_path)
 
     inference_engine_holder = ActiveModelHolder()
+    debouncer = Debouncer()
 
-    def wrapped_train_fn(samples: list) -> None:
+    def _check_artifact_matches_config(artifact: ModelArtifact) -> None:
+        """설정 YAML의 window_size/tags가 학습 이후 바뀌면 모델은 정상적으로 로드되지만
+        InferenceEngine.score()가 매 틱 None을 반환해 아무 것도 발행하지 않는다
+        (겉보기 상태는 정상 MONITORING). 손상된 모델 파일과 동일하게 취급한다."""
+        if artifact.window_size != config.window_size or set(artifact.tags) != set(config.tags):
+            raise ValueError(
+                f"model artifact incompatible with current config: "
+                f"window_size {artifact.window_size} vs {config.window_size}, "
+                f"tags {artifact.tags} vs {config.tags}"
+            )
+
+    def wrapped_train_fn(samples: list[CalibrationSample]) -> None:
         train_fn(samples)
         # 학습이 방금 성공적으로 저장한 모델을 즉시 메모리에 올려, 다음 틱부터
         # 바로 채점을 시작할 수 있게 한다 (재시작을 기다릴 필요 없음).
-        inference_engine_holder.set(InferenceEngine(load_artifact(model_path)))
+        artifact = load_artifact(model_path)
+        _check_artifact_matches_config(artifact)
+        inference_engine_holder.set(InferenceEngine(artifact))
+        # 새 모델은 오차 통계가 완전히 다르므로, 이전 모델 점수로 쌓인 연속 초과
+        # 카운터를 물려받아 첫 틱부터 알람이 확정되는 일이 없도록 리셋한다.
+        debouncer.reset()
 
     calibration_manager = CalibrationManager(
         buffer_writer=buffer_writer,
@@ -79,15 +97,16 @@ def build_pipeline(
 
     if calibration_manager.state == CalibrationState.MONITORING:
         try:
-            inference_engine_holder.set(InferenceEngine(load_artifact(model_path)))
+            artifact = load_artifact(model_path)
+            _check_artifact_matches_config(artifact)
+            inference_engine_holder.set(InferenceEngine(artifact))
             print(f"[build_pipeline] 저장된 모델을 불러와 MONITORING으로 재개: {model_path}")
         except Exception as e:
-            # 모델 파일 손상/누락 — MONITORING 진입을 막고 CALIBRATING으로 폴백해
-            # 사람이 재학습을 판단하도록 한다 (상위 문서 5절 에러 처리 원칙).
+            # 모델 파일 손상/누락, 또는 config와 불일치 — MONITORING 진입을 막고
+            # CALIBRATING으로 폴백해 사람이 재학습을 판단하도록 한다
+            # (상위 문서 5절 에러 처리 원칙).
             print(f"[build_pipeline] 모델 로드 실패, CALIBRATING으로 폴백: {e}")
             calibration_manager.handle_recalibrate_command()
-
-    debouncer = Debouncer()
 
     snapshotter = PeriodicSnapshotter(
         tag_buffer=tag_buffer,

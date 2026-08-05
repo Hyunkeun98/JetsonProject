@@ -269,3 +269,9 @@ def make_train_fn(
 
 def model_artifact_path(model_dir: str | Path, equipment_id: str) -> Path:
     return Path(model_dir) / f"{equipment_id}.pt"
+
+
+def state_marker_path(model_dir: str | Path, equipment_id: str) -> Path:
+    """캘리브레이션 상태 마커 파일 경로. 모델 아티팩트와 같은 디렉터리 규칙을 쓰므로
+    model_artifact_path와 나란히 둔다 (경로 조립 규칙이 여러 곳에 흩어지지 않게)."""
+    return Path(model_dir) / f"{equipment_id}.state"

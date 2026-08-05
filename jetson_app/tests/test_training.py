@@ -146,7 +146,12 @@ def test_make_train_fn_trains_and_saves(tmp_path: Path):
 import torch
 
 from jetson_app.model import AnomalyGRU
-from jetson_app.training import compute_raw_errors, model_artifact_path, normalize_continuous_columns
+from jetson_app.training import (
+    compute_raw_errors,
+    model_artifact_path,
+    normalize_continuous_columns,
+    state_marker_path,
+)
 
 
 def test_normalize_continuous_columns_only_touches_continuous_indices():
@@ -178,3 +183,8 @@ def test_compute_raw_errors_shapes_and_non_negative():
 def test_model_artifact_path_builds_expected_path():
     path = model_artifact_path("model_data", "line_A")
     assert path == Path("model_data") / "line_A.pt"
+
+
+def test_state_marker_path_builds_expected_path():
+    path = state_marker_path("model_data", "line_A")
+    assert path == Path("model_data") / "line_A.state"

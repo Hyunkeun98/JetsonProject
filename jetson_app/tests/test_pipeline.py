@@ -1,5 +1,6 @@
 import json
 import time
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -262,9 +263,12 @@ def test_pipeline_scores_and_publishes_after_training(tmp_path):
     assert pipeline.inference_engine_holder.get() is not None
 
     published = []
-    pipeline.mqtt_subscriber.client.publish = lambda topic, payload: published.append(
-        (topic, payload)
-    )
+
+    def _fake_publish(topic, payload):
+        published.append((topic, payload))
+        return SimpleNamespace(rc=0)  # ResultPublisher가 rc를 확인한다
+
+    pipeline.mqtt_subscriber.client.publish = _fake_publish
 
     pipeline.snapshotter.start()
     try:
@@ -342,6 +346,167 @@ def test_pipeline_resumes_monitoring_after_restart(tmp_path):
     )
     assert second.calibration_manager.state == CalibrationState.MONITORING
     assert second.inference_engine_holder.get() is not None
+
+
+def _feed_and_train(pipeline, tags, count=20):
+    """MQTT 메시지를 흘려 캘리브레이션 버퍼를 채운 뒤 train 명령까지 보낸다
+    (test_pipeline_resumes_monitoring_after_restart의 절차를 그대로 따른다)."""
+    pipeline.snapshotter.start()
+    try:
+        for i in range(count):
+            record = {"timestamp": "2026-08-04T00:00:00+0000"}
+            for j, tag in enumerate(tags):
+                record[tag] = float(i) if j == 0 else i % 2
+            payload = json.dumps({"records": [record]}).encode("utf-8")
+            pipeline.mqtt_subscriber._handle_message(
+                None, None, SimpleNamespace(payload=payload)
+            )
+            time.sleep(0.01)
+    finally:
+        pipeline.snapshotter.stop()
+    pipeline.command_subscriber._handle_command_message(
+        None, None, SimpleNamespace(payload=b'{"command": "train"}')
+    )
+
+
+def test_pipeline_falls_back_to_calibrating_when_config_window_size_changed(tmp_path):
+    """모델 학습 후 config의 window_size가 바뀌면, 모델은 정상 로드되지만
+    InferenceEngine.score()가 매 틱 None을 반환해 아무 것도 발행하지 않는다.
+    손상된 모델 파일과 동일하게 CALIBRATING으로 폴백해야 한다."""
+    config = EquipmentConfig(
+        equipment_id="e2e_wsmismatch",
+        subscribe_topics=("dx1/e2e_wsmismatch/data",),
+        publish_topic="jetson/e2e_wsmismatch/anomaly",
+        command_topic="jetson/e2e_wsmismatch/cmd",
+        tags=("tag_a", "tag_b"),
+        resample_interval_ms=5,
+        window_size=3,
+        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
+    )
+    model_dir = tmp_path / "model_data"
+    train_fn = make_train_fn(
+        tags=config.tags,
+        window_size=config.window_size,
+        model_path=model_dir / f"{config.equipment_id}.pt",
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    _feed_and_train(first, config.tags)
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+
+    # "재시작": config YAML의 window_size만 바뀐 채로 같은 model_dir을 다시 연다
+    changed = replace(config, window_size=5)
+    second = build_pipeline(
+        config=changed,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+
+    assert second.calibration_manager.state == CalibrationState.CALIBRATING
+    assert second.inference_engine_holder.get() is None
+
+
+def test_pipeline_falls_back_to_calibrating_when_config_tags_changed(tmp_path):
+    config = EquipmentConfig(
+        equipment_id="e2e_tagmismatch",
+        subscribe_topics=("dx1/e2e_tagmismatch/data",),
+        publish_topic="jetson/e2e_tagmismatch/anomaly",
+        command_topic="jetson/e2e_tagmismatch/cmd",
+        tags=("tag_a", "tag_b"),
+        resample_interval_ms=5,
+        window_size=3,
+        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
+    )
+    model_dir = tmp_path / "model_data"
+    train_fn = make_train_fn(
+        tags=config.tags,
+        window_size=config.window_size,
+        model_path=model_dir / f"{config.equipment_id}.pt",
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    _feed_and_train(first, config.tags)
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+
+    # "재시작": tag_b가 tag_c로 교체된 config
+    changed = replace(config, tags=("tag_a", "tag_c"))
+    second = build_pipeline(
+        config=changed,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+
+    assert second.calibration_manager.state == CalibrationState.CALIBRATING
+    assert second.inference_engine_holder.get() is None
+
+
+def test_pipeline_stays_calibrating_after_recalibrate_even_though_model_file_remains(tmp_path):
+    """recalibrate는 의도적으로 모델 파일을 지우지 않고 상태 마커만 되돌린다.
+    그 직후 재시작하면 남아있는 모델로 MONITORING을 재개하는 게 아니라
+    CALIBRATING에 머물러야 한다."""
+    config = EquipmentConfig(
+        equipment_id="e2e_recal_restart",
+        subscribe_topics=("dx1/e2e_recal_restart/data",),
+        publish_topic="jetson/e2e_recal_restart/anomaly",
+        command_topic="jetson/e2e_recal_restart/cmd",
+        tags=("tag_a", "tag_b"),
+        resample_interval_ms=5,
+        window_size=3,
+        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
+    )
+    model_dir = tmp_path / "model_data"
+    train_fn = make_train_fn(
+        tags=config.tags,
+        window_size=config.window_size,
+        model_path=model_dir / f"{config.equipment_id}.pt",
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    _feed_and_train(first, config.tags)
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+
+    first.command_subscriber._handle_command_message(
+        None, None, SimpleNamespace(payload=b'{"command": "recalibrate"}')
+    )
+    assert first.calibration_manager.state == CalibrationState.CALIBRATING
+
+    model_path = model_dir / f"{config.equipment_id}.pt"
+    assert model_path.exists()  # 모델 파일은 의도적으로 남아있어야 한다
+
+    second = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    assert second.calibration_manager.state == CalibrationState.CALIBRATING
+    assert second.inference_engine_holder.get() is None
 
 
 def test_pipeline_falls_back_to_calibrating_when_model_file_corrupted(tmp_path):

@@ -250,6 +250,30 @@ def test_tick_skips_publish_when_engine_returns_none():
     assert publisher.published == []
 
 
+def test_tick_does_not_score_when_debouncer_and_publisher_missing():
+    """holder만 주입되고 debouncer/result_publisher가 None이면(생성자 타입힌트상 가능),
+    채점을 조용히 건너뛰어야 한다. 그냥 진행하면 AttributeError가 매 틱 발생하고
+    _run의 포괄 예외 처리에 삼켜져 로그만 무한히 쌓인다."""
+    tag_buffer = TagBuffer(("a",))
+    sliding_window = SlidingWindow(2)
+    _fill_window(tag_buffer, sliding_window, 2)
+    calibration_manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    engine = _FakeEngine(AnomalyResult(anomaly_score=5.0, top_deviant_tag="a"))
+    snapshotter = PeriodicSnapshotter(
+        tag_buffer=tag_buffer,
+        sliding_window=sliding_window,
+        calibration_manager=calibration_manager,
+        interval_ms=50,
+        inference_engine_holder=_FakeHolder(engine),
+        debouncer=None,
+        result_publisher=None,
+    )
+    tag_buffer.update({"a": 99.0})
+    snapshotter._tick()  # 예외 없이 통과해야 한다
+    assert engine.calls == []
+    assert calibration_manager.recorded  # 캘리브레이션 기록은 계속됨
+
+
 def test_tick_without_inference_collaborators_still_records_calibration():
     tag_buffer = TagBuffer(("a",))
     sliding_window = SlidingWindow(2)

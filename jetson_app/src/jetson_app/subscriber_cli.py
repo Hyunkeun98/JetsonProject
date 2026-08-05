@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 from .config import ConfigError, load_equipment_config
 from .pipeline import build_pipeline
-from .training import make_train_fn
+from .training import make_train_fn, model_artifact_path
 
 
 def main() -> None:
@@ -28,7 +27,7 @@ def main() -> None:
 
     try:
         config = load_equipment_config(args.config)
-        model_path = Path(args.model_dir) / f"{config.equipment_id}.pt"
+        model_path = model_artifact_path(args.model_dir, config.equipment_id)
         # 잘못된 --model-dir이 학습 완료 후 save_artifact 안(예외를 삼키는 MQTT 명령
         # 콜백)에서야 드러나지 않도록, --calibration-dir과 동일하게 기동 시점에
         # 디렉터리를 만들어 OSError를 아래 핸들러로 흘린다.

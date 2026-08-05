@@ -25,3 +25,9 @@ class Debouncer:
         else:
             self._consecutive_over = 0
         return self._consecutive_over >= self._confirm_ticks
+
+    def reset(self) -> None:
+        """연속 초과 카운터를 초기화한다. 재학습으로 InferenceEngine이 교체되면
+        이전 모델의 점수 이력으로 쌓인 카운터가 새 모델의 첫 틱에서 곧바로 알람을
+        확정시킬 수 있으므로, 모델 교체 시점에 호출한다."""
+        self._consecutive_over = 0

@@ -43,7 +43,14 @@ class PeriodicSnapshotter:
         self._tick_count = 0
 
     def _score_and_publish(self, timestamp: str, snapshot) -> None:
-        if self._inference_engine_holder is None:
+        # 세 협력자는 함께 있어야만 채점이 성립한다. 하나라도 없는 상태로 진행하면
+        # 뒤쪽 update()/publish()에서 AttributeError가 나고, _run의 포괄 예외 처리에
+        # 삼켜져 매 틱 로그만 쏟아진다.
+        if (
+            self._inference_engine_holder is None
+            or self._debouncer is None
+            or self._result_publisher is None
+        ):
             return
         if self._calibration_manager.state != CalibrationState.MONITORING:
             return
