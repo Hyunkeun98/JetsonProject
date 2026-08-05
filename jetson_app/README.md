@@ -4,7 +4,7 @@ Jetson 쪽 실시간 이상탐지 프레임워크의 통신 + 데이터 파이�
 
 전체 설계 배경은 [`../docs/superpowers/specs/2026-07-31-jetson-dx1-anomaly-framework-design.md`](../docs/superpowers/specs/2026-07-31-jetson-dx1-anomaly-framework-design.md), 이 통신 레이어의 구현 계획은 [`../docs/superpowers/plans/2026-08-03-jetson-mqtt-communication-layer.md`](../docs/superpowers/plans/2026-08-03-jetson-mqtt-communication-layer.md) 참고.
 
-현재 범위: 설비 config 로더(다중 토픽) + MQTT 파싱/구독자 + Tag Buffer/슬라이딩 윈도우 + 주기 스냅샷 스케줄러 + 캘리브레이션 저장/상태머신 + MQTT train/recalibrate 명령 구독자 + CLI 진입점(코드, 유닛테스트 완료). 실제 모델 학습/Inference/Result Publisher는 이후 별도 계획(현재 `train_fn`은 자리표시자).
+현재 범위: 설비 config 로더(다중 토픽) + MQTT 파싱/구독자 + Tag Buffer/슬라이딩 윈도우 + 주기 스냅샷 스케줄러 + 캘리브레이션 저장/상태머신 + MQTT train/recalibrate 명령 구독자 + 설비 통합 PyTorch GRU 모델 학습(태그 타입별 손실, 정규화/오차 통계 저장/로드) + CLI 진입점(코드, 유닛테스트 완료). 실시간 이상 점수 계산/디바운스/Result Publisher는 이후 별도 계획.
 
 ## 필요 환경
 
@@ -117,6 +117,21 @@ cp configs/test_dx1.example.yaml configs/test_dx1.yaml
 
 `configs/test_dx1.yaml`의 `tags` 목록을, 아래에서 DX1에 등록할 실제 태그명과 동일하게 수정한다.
 
+### 2-5. Jetson 전용 PyTorch로 교체 (GPU 가속용, 선택)
+
+`uv sync`는 PyPI의 일반 torch wheel(CPU 전용, aarch64도 지원)을 설치한다. 이것만으로도 학습/추론은 동작하지만 Jetson의 GPU를 쓰지 못한다. GPU 가속이 필요해지면 NVIDIA가 JetPack 버전별로 배포하는 전용 wheel로 교체한다:
+
+1. 현재 JetPack 버전 확인: `sudo apt-cache show nvidia-jetpack | grep Version` (또는 `cat /etc/nv_tegra_release`)
+2. https://developer.download.nvidia.com/compute/redist/jp/ 에서 해당 JetPack 버전 폴더의 torch wheel(`.whl`) URL을 확인한다.
+3. 프로젝트 가상환경 안에서 PyPI 버전을 제거하고 해당 wheel을 직접 설치한다:
+   ```bash
+   uv pip uninstall torch
+   uv pip install <위에서 확인한 .whl URL 또는 로컬 경로>
+   ```
+4. 확인: `uv run python -c "import torch; print(torch.cuda.is_available())"`가 `True`를 출력하면 GPU 인식 성공.
+
+이후 `uv sync`를 다시 실행하면 `pyproject.toml`에 적힌 일반 torch로 되돌아간다 — JetPack wheel을 유지하려면 `uv sync --no-install-package torch`를 쓰거나, `uv sync` 이후 3번 단계를 다시 실행한다.
+
 ## 3. DX1의 SpeeDBee Synapse에서 MQTT Emitter 설정
 
 SpeeDBee Synapse 관리 화면에서:
@@ -155,6 +170,9 @@ uv run jetson-app --config configs/test_dx1.yaml --host localhost
 mosquitto_pub -h localhost -t "jetson/test_dx1/cmd" -m '{"command": "train"}'
 mosquitto_pub -h localhost -t "jetson/test_dx1/cmd" -m '{"command": "recalibrate"}'
 ```
+
+- `--model-dir` 플래그로 학습된 모델을 저장할 위치를 지정한다(기본: `model_data`). `train` 명령이 성공하면 `<model-dir>/<equipment_id>.pt`에 GRU 가중치 + 정규화 통계 + 태그 타입 + 오차 분포 통계가 함께 저장된다.
+- `train` 명령은 이제 실제로 PyTorch GRU 모델을 학습한다(캘리브레이션 샘플 수·태그 수에 따라 CPU에서 수 초~수십 초 소요될 수 있다). 학습이 끝나기 전까지는 다른 MQTT 명령 처리가 지연될 수 있다.
 
 > 주의: 이 명령들에는 절대 `-r`(retain)을 붙이지 않는다. retain된 명령 메시지는 앱이 재접속할 때마다 다시 전달되어 의도치 않게 재실행된다.
 

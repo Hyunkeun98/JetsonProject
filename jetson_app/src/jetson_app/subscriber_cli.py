@@ -2,17 +2,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
-from .calibration import CalibrationSample
 from .config import ConfigError, load_equipment_config
 from .pipeline import build_pipeline
-
-
-def _placeholder_train_fn(samples: list[CalibrationSample]) -> None:
-    print(
-        f"[학습] {len(samples)}개 샘플로 학습을 실행합니다 "
-        "(모델 미연결 — 다음 계획에서 실제 GRU 학습으로 교체 예정)"
-    )
+from .training import make_train_fn
 
 
 def main() -> None:
@@ -25,14 +19,25 @@ def main() -> None:
         default="calibration_data",
         help="캘리브레이션 버퍼 파일을 저장할 디렉터리 (기본: calibration_data)",
     )
+    parser.add_argument(
+        "--model-dir",
+        default="model_data",
+        help="학습된 모델 아티팩트를 저장할 디렉터리 (기본: model_data)",
+    )
     args = parser.parse_args()
 
     try:
         config = load_equipment_config(args.config)
+        model_path = Path(args.model_dir) / f"{config.equipment_id}.pt"
+        train_fn = make_train_fn(
+            tags=config.tags,
+            window_size=config.window_size,
+            model_path=model_path,
+        )
         pipeline = build_pipeline(
             config=config,
             calibration_dir=args.calibration_dir,
-            train_fn=_placeholder_train_fn,
+            train_fn=train_fn,
         )
         pipeline.mqtt_subscriber.connect(args.host, args.port)
     except (ConfigError, OSError) as e:
@@ -42,7 +47,8 @@ def main() -> None:
     pipeline.snapshotter.start()
     print(
         f"[{config.equipment_id}] {len(config.subscribe_topics)}개 토픽 구독 시작 "
-        f"({args.host}:{args.port}), 캘리브레이션 데이터: {args.calibration_dir}"
+        f"({args.host}:{args.port}), 캘리브레이션 데이터: {args.calibration_dir}, "
+        f"모델 저장 위치: {args.model_dir}"
     )
     try:
         pipeline.mqtt_subscriber.loop_forever()
