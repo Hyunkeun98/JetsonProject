@@ -61,3 +61,13 @@ def compute_normalization_stats(
         std = statistics.pstdev(observed) if len(observed) > 1 else 0.0
         result[tag] = NormalizationStats(mean=mean, std=std if std > 0 else 1.0)
     return result
+
+
+def type_indices(tags: tuple[str, ...], tag_types: dict[str, str]) -> tuple[list[int], list[int]]:
+    """tag_types(문자열 값 — ModelArtifact에 저장되는 형태)를 기준으로, tags 순서에
+    맞는 연속/이진 태그의 인덱스 목록을 만든다. 학습(training.py)과 실시간 추론
+    (inference.py)이 태그 인덱스를 항상 이 함수로만 파생시켜, 두 군데서 파생 로직이
+    어긋나는 것을 방지한다."""
+    continuous_indices = [i for i, t in enumerate(tags) if tag_types[t] == TagType.CONTINUOUS.value]
+    binary_indices = [i for i, t in enumerate(tags) if tag_types[t] == TagType.BINARY.value]
+    return continuous_indices, binary_indices

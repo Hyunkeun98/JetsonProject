@@ -95,3 +95,38 @@ def test_compute_normalization_stats_excludes_binary_tags():
     result = compute_normalization_stats(samples, ("a", "b"), tag_types)
     assert "a" not in result
     assert "b" in result
+
+
+from jetson_app.tag_stats import type_indices
+
+
+def test_type_indices_separates_continuous_and_binary():
+    tags = ("a", "b", "c")
+    tag_types = {"a": "binary", "b": "continuous", "c": "binary"}
+    continuous_indices, binary_indices = type_indices(tags, tag_types)
+    assert continuous_indices == [1]
+    assert binary_indices == [0, 2]
+
+
+def test_type_indices_all_continuous():
+    tags = ("x", "y")
+    tag_types = {"x": "continuous", "y": "continuous"}
+    continuous_indices, binary_indices = type_indices(tags, tag_types)
+    assert continuous_indices == [0, 1]
+    assert binary_indices == []
+
+
+def test_type_indices_all_binary():
+    tags = ("x", "y")
+    tag_types = {"x": "binary", "y": "binary"}
+    continuous_indices, binary_indices = type_indices(tags, tag_types)
+    assert continuous_indices == []
+    assert binary_indices == [0, 1]
+
+
+def test_type_indices_preserves_tags_order():
+    tags = ("c", "a", "b")
+    tag_types = {"a": "binary", "b": "continuous", "c": "continuous"}
+    continuous_indices, binary_indices = type_indices(tags, tag_types)
+    assert continuous_indices == [0, 2]  # c(0), b(2) — tags 순서 기준
+    assert binary_indices == [1]  # a(1)
