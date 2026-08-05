@@ -27,6 +27,28 @@ def test_detect_tag_types_treats_float_zero_one_as_binary():
     assert result["a"] == TagType.BINARY
 
 
+def test_detect_tag_types_constant_zero_tag_is_continuous():
+    """캘리브레이션 내내 값이 0 하나뿐인 태그(예: 유휴 상태 축 속도)를
+    BINARY로 분류하면 정규화 통계 없이 sigmoid head가 붙어 영구 오알람이 난다."""
+    samples = [
+        CalibrationSample(timestamp="t1", values={"a": 0, "b": 0.0}),
+        CalibrationSample(timestamp="t2", values={"a": 0, "b": 0.0}),
+        CalibrationSample(timestamp="t3", values={"a": 0, "b": 0.0}),
+    ]
+    result = detect_tag_types(samples, ("a", "b"))
+    assert result["a"] == TagType.CONTINUOUS
+    assert result["b"] == TagType.CONTINUOUS
+
+
+def test_detect_tag_types_constant_one_tag_is_continuous():
+    samples = [
+        CalibrationSample(timestamp="t1", values={"a": 1}),
+        CalibrationSample(timestamp="t2", values={"a": 1.0}),
+    ]
+    result = detect_tag_types(samples, ("a",))
+    assert result["a"] == TagType.CONTINUOUS
+
+
 def test_detect_tag_types_never_observed_defaults_continuous():
     samples = [CalibrationSample(timestamp="t1", values={"a": None})]
     result = detect_tag_types(samples, ("a",))

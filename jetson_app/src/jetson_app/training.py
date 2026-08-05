@@ -16,6 +16,10 @@ DEFAULT_NUM_LAYERS = 2
 DEFAULT_LEARNING_RATE = 1e-3
 DEFAULT_EPOCHS = 20
 DEFAULT_BATCH_SIZE = 64
+# 캘리브레이션 버퍼는 calibration.max_duration까지 자라기 때문에(예: 7d @ 50ms ≈ 12M 샘플)
+# 전체를 윈도잉하면 수 GB 텐서가 되어 4GB Jetson에서 OOM이 난다.
+# 학습에는 가장 최근 구간만 쓴다.
+DEFAULT_MAX_TRAINING_SAMPLES = 20_000
 
 
 @dataclass(frozen=True)
@@ -39,7 +43,11 @@ def train_model(
     num_layers: int = DEFAULT_NUM_LAYERS,
     learning_rate: float = DEFAULT_LEARNING_RATE,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    max_training_samples: int = DEFAULT_MAX_TRAINING_SAMPLES,
 ) -> ModelArtifact:
+    if len(samples) > max_training_samples:
+        samples = samples[-max_training_samples:]
+
     tag_types = detect_tag_types(samples, tags)
     norm_stats = compute_normalization_stats(samples, tags, tag_types)
 
@@ -48,6 +56,16 @@ def train_model(
 
     X, y = build_windows(samples, tags, window_size)
     if X.shape[0] == 0:
+        # 윈도우가 0개인 가장 흔한 실제 원인은 샘플 부족이 아니라 config tags 오탈자다
+        # (DX1이 한 번도 발행하지 않는 태그 → 모든 샘플이 None → 모든 윈도우가 버려짐).
+        never_observed_tags = [
+            t for t in tags if not any(s.values.get(t) is not None for s in samples)
+        ]
+        if never_observed_tags:
+            raise ValueError(
+                f"tags never observed in calibration data: {never_observed_tags} "
+                f"— check config tags against DX1 topic payloads"
+            )
         raise ValueError(
             f"not enough calibration samples to build any training window "
             f"(have {len(samples)} samples, need > {window_size})"
@@ -91,7 +109,9 @@ def train_model(
             loss.backward()
             optimizer.step()
 
-    error_stats = _compute_error_stats(model, X, y, tags, continuous_indices, binary_indices)
+    error_stats = _compute_error_stats(
+        model, X, y, tags, continuous_indices, binary_indices, batch_size
+    )
 
     return ModelArtifact(
         tags=tags,
@@ -105,6 +125,14 @@ def train_model(
     )
 
 
+def _floor_std(mean: float, std: float) -> float:
+    """오차 표준편차의 하한. 잘 학습된 모델의 잔차 std는 0.02처럼 아주 작을 수 있는데,
+    이상 점수 계산이 이 std로 나누기 때문에 사소한 오차 변동도 z-score 20+로 튄다
+    (임계값은 3 근처). 절대 하한 1e-3과 평균 대비 상대 하한 5%를 함께 적용한다."""
+    floor = max(1e-3, 0.05 * abs(mean))
+    return std if std > floor else floor
+
+
 def _compute_error_stats(
     model: AnomalyGRU,
     X: torch.Tensor,
@@ -112,12 +140,23 @@ def _compute_error_stats(
     tags: tuple[str, ...],
     continuous_indices: list[int],
     binary_indices: list[int],
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> dict[str, tuple[float, float]]:
     """학습 완료 후 캘리브레이션 데이터 전체에 대한 태그별 "정상 오차" 평균/표준편차.
-    실시간 이상 점수 계산(다음 계획)에서 원본 오차를 재정규화하는 기준으로 쓰인다."""
+    실시간 이상 점수 계산(다음 계획)에서 원본 오차를 재정규화하는 기준으로 쓰인다.
+    전체 X를 한 번에 forward하면 메모리가 무제한으로 커지므로 batch_size 단위로 나눠 돈다."""
     model.eval()
+    continuous_chunks: list[torch.Tensor] = []
+    binary_chunks: list[torch.Tensor] = []
     with torch.no_grad():
-        continuous_out, binary_logits = model(X)
+        for start in range(0, X.shape[0], batch_size):
+            chunk_continuous, chunk_binary = model(X[start : start + batch_size])
+            if chunk_continuous is not None:
+                continuous_chunks.append(chunk_continuous)
+            if chunk_binary is not None:
+                binary_chunks.append(chunk_binary)
+    continuous_out = torch.cat(continuous_chunks) if continuous_chunks else None
+    binary_logits = torch.cat(binary_chunks) if binary_chunks else None
 
     errors: dict[str, torch.Tensor] = {}
     for pos, idx in enumerate(continuous_indices):
@@ -134,7 +173,7 @@ def _compute_error_stats(
             std = variance ** 0.5
         else:
             std = 0.0
-        result[tag] = (mean, std if std > 0 else 1.0)
+        result[tag] = (mean, _floor_std(mean, std))
     return result
 
 
@@ -179,6 +218,7 @@ def make_train_fn(
     num_layers: int = DEFAULT_NUM_LAYERS,
     learning_rate: float = DEFAULT_LEARNING_RATE,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    max_training_samples: int = DEFAULT_MAX_TRAINING_SAMPLES,
 ) -> TrainFn:
     def _train_fn(samples: list[CalibrationSample]) -> None:
         artifact = train_model(
@@ -190,6 +230,7 @@ def make_train_fn(
             num_layers=num_layers,
             learning_rate=learning_rate,
             batch_size=batch_size,
+            max_training_samples=max_training_samples,
         )
         save_artifact(model_path, artifact)
 

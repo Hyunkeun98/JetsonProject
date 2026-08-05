@@ -28,7 +28,12 @@ def detect_tag_types(
         observed = [
             s.values[tag] for s in samples if tag in s.values and s.values[tag] is not None
         ]
-        if observed and all(v in _BINARY_VALUES for v in observed):
+        # 상수 태그(캘리브레이션 내내 항상 0 또는 항상 1)를 BINARY로 오분류하면
+        # 정규화 통계 없이 BCE/sigmoid head가 붙어 운영 중 값이 바뀌는 순간
+        # 영구적으로 오알람이 난다. 서로 다른 값이 최소 2개 관측된 경우에만
+        # BINARY로 보고, 나머지는 안전한 기본값인 CONTINUOUS로 떨어뜨린다.
+        distinct = set(observed)
+        if len(distinct) >= 2 and all(v in _BINARY_VALUES for v in distinct):
             result[tag] = TagType.BINARY
         else:
             result[tag] = TagType.CONTINUOUS

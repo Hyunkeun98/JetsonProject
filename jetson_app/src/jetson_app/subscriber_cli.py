@@ -29,6 +29,10 @@ def main() -> None:
     try:
         config = load_equipment_config(args.config)
         model_path = Path(args.model_dir) / f"{config.equipment_id}.pt"
+        # 잘못된 --model-dir이 학습 완료 후 save_artifact 안(예외를 삼키는 MQTT 명령
+        # 콜백)에서야 드러나지 않도록, --calibration-dir과 동일하게 기동 시점에
+        # 디렉터리를 만들어 OSError를 아래 핸들러로 흘린다.
+        model_path.parent.mkdir(parents=True, exist_ok=True)
         train_fn = make_train_fn(
             tags=config.tags,
             window_size=config.window_size,
