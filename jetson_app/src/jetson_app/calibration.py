@@ -22,6 +22,29 @@ class CalibrationState(Enum):
     MONITORING = "MONITORING"
 
 
+class StateStore:
+    """CALIBRATING/MONITORING 상태를 파일로 영속화해, Jetson 재시작 시 이어서
+    복구할 수 있게 한다. 모델 파일과 별도로 관리한다 — recalibrate는 모델 파일은
+    남겨두고 이 마커만 CALIBRATING으로 되돌리므로, 재시작 시 반드시 이 마커를
+    기준으로 판단해야 한다(모델 파일이 있다고 바로 MONITORING으로 재개하면 안 된다)."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+
+    def read(self) -> CalibrationState:
+        if not self._path.exists():
+            return CalibrationState.CALIBRATING
+        text = self._path.read_text(encoding="utf-8").strip()
+        try:
+            return CalibrationState(text)
+        except ValueError:
+            return CalibrationState.CALIBRATING
+
+    def write(self, state: CalibrationState) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(state.value, encoding="utf-8")
+
+
 @dataclass(frozen=True)
 class CalibrationSample:
     timestamp: str
@@ -102,14 +125,16 @@ class CalibrationManager:
         min_samples: int,
         max_duration: timedelta,
         train_fn: TrainFn,
+        state_store: StateStore,
     ) -> None:
         self._buffer_writer = buffer_writer
         self._min_samples = min_samples
         self._max_duration = max_duration
         self._train_fn = train_fn
+        self._state_store = state_store
         self._lock = threading.Lock()
         self._tick_count = 0
-        self.state = CalibrationState.CALIBRATING
+        self.state = state_store.read()
 
     def record_sample(self, snapshot: Snapshot, timestamp: str) -> None:
         with self._lock:
@@ -133,8 +158,10 @@ class CalibrationManager:
             self._train_fn(samples)
             self._buffer_writer.clear()
             self.state = CalibrationState.MONITORING
+            self._state_store.write(self.state)
 
     def handle_recalibrate_command(self) -> None:
         with self._lock:
             self._buffer_writer.clear()
             self.state = CalibrationState.CALIBRATING
+            self._state_store.write(self.state)

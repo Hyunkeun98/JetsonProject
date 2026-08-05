@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,7 @@ from jetson_app.calibration import (
     CalibrationError,
     CalibrationManager,
     CalibrationState,
+    StateStore,
 )
 
 
@@ -64,6 +66,7 @@ def _make_manager(tmp_path, min_samples=2, max_duration=timedelta(days=7), train
         min_samples=min_samples,
         max_duration=max_duration,
         train_fn=train_fn,
+        state_store=StateStore(tmp_path / "state"),
     )
     return manager, writer, calls
 
@@ -135,3 +138,71 @@ def test_calibration_manager_record_sample_ignored_while_monitoring(tmp_path):
     manager.record_sample(Snapshot(values={"a": 2}), "2026-08-04T00:00:02+00:00")
 
     assert writer.count() == 0
+
+
+def test_state_store_missing_file_defaults_calibrating(tmp_path: Path):
+    store = StateStore(tmp_path / "line_A.state")
+    assert store.read() == CalibrationState.CALIBRATING
+
+
+def test_state_store_round_trip(tmp_path: Path):
+    store = StateStore(tmp_path / "line_A.state")
+    store.write(CalibrationState.MONITORING)
+    assert store.read() == CalibrationState.MONITORING
+    store.write(CalibrationState.CALIBRATING)
+    assert store.read() == CalibrationState.CALIBRATING
+
+
+def test_state_store_corrupted_content_defaults_calibrating(tmp_path: Path):
+    path = tmp_path / "line_A.state"
+    path.write_text("garbage", encoding="utf-8")
+    store = StateStore(path)
+    assert store.read() == CalibrationState.CALIBRATING
+
+
+def test_state_store_creates_parent_directory(tmp_path: Path):
+    store = StateStore(tmp_path / "nested" / "line_A.state")
+    store.write(CalibrationState.MONITORING)
+    assert store.read() == CalibrationState.MONITORING
+
+
+def test_calibration_manager_resumes_state_from_store(tmp_path: Path):
+    state_path = tmp_path / "state"
+    StateStore(state_path).write(CalibrationState.MONITORING)
+    manager = CalibrationManager(
+        buffer_writer=CalibrationBufferWriter(tmp_path / "buf.jsonl"),
+        min_samples=1,
+        max_duration=timedelta(days=7),
+        train_fn=lambda samples: None,
+        state_store=StateStore(state_path),
+    )
+    assert manager.state == CalibrationState.MONITORING
+
+
+def test_calibration_manager_persists_state_on_train(tmp_path: Path):
+    state_path = tmp_path / "state"
+    buffer_writer = CalibrationBufferWriter(tmp_path / "buf.jsonl")
+    buffer_writer.append(Snapshot(values={"a": 1.0}), "2026-01-01T00:00:00+00:00")
+    manager = CalibrationManager(
+        buffer_writer=buffer_writer,
+        min_samples=1,
+        max_duration=timedelta(days=7),
+        train_fn=lambda samples: None,
+        state_store=StateStore(state_path),
+    )
+    manager.handle_train_command()
+    assert StateStore(state_path).read() == CalibrationState.MONITORING
+
+
+def test_calibration_manager_persists_state_on_recalibrate(tmp_path: Path):
+    state_path = tmp_path / "state"
+    StateStore(state_path).write(CalibrationState.MONITORING)
+    manager = CalibrationManager(
+        buffer_writer=CalibrationBufferWriter(tmp_path / "buf.jsonl"),
+        min_samples=1,
+        max_duration=timedelta(days=7),
+        train_fn=lambda samples: None,
+        state_store=StateStore(state_path),
+    )
+    manager.handle_recalibrate_command()
+    assert StateStore(state_path).read() == CalibrationState.CALIBRATING

@@ -2,7 +2,7 @@ import time
 from datetime import timedelta
 
 from jetson_app.buffer import SlidingWindow, TagBuffer
-from jetson_app.calibration import CalibrationBufferWriter, CalibrationManager
+from jetson_app.calibration import CalibrationBufferWriter, CalibrationManager, StateStore
 from jetson_app.scheduler import PeriodicSnapshotter
 
 
@@ -13,6 +13,7 @@ def _make_calibration_manager(tmp_path):
         min_samples=1,
         max_duration=timedelta(days=7),
         train_fn=lambda samples: None,
+        state_store=StateStore(tmp_path / "state"),
     ), writer
 
 
