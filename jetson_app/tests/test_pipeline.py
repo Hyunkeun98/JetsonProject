@@ -3,10 +3,11 @@ import time
 from datetime import timedelta
 from types import SimpleNamespace
 
-from jetson_app.calibration import CalibrationState
+from jetson_app.calibration import CalibrationState, StateStore
 from jetson_app.config import CalibrationConfig, EquipmentConfig
+from jetson_app.model import AnomalyGRU
 from jetson_app.pipeline import build_pipeline
-from jetson_app.training import load_artifact, make_train_fn
+from jetson_app.training import ModelArtifact, load_artifact, make_train_fn, save_artifact
 
 
 def _make_config(tmp_path):
@@ -28,6 +29,7 @@ def test_build_pipeline_wires_all_components(tmp_path):
     pipeline = build_pipeline(
         config=config,
         calibration_dir=tmp_path / "calibration_data",
+        model_dir=tmp_path / "model_data",
         train_fn=lambda samples: None,
     )
 
@@ -42,6 +44,7 @@ def test_build_pipeline_command_subscriber_shares_calibration_manager(tmp_path):
     pipeline = build_pipeline(
         config=config,
         calibration_dir=tmp_path / "calibration_data",
+        model_dir=tmp_path / "model_data",
         train_fn=lambda samples: None,
     )
 
@@ -53,6 +56,7 @@ def test_build_pipeline_on_record_updates_tag_buffer(tmp_path):
     pipeline = build_pipeline(
         config=config,
         calibration_dir=tmp_path / "calibration_data",
+        model_dir=tmp_path / "model_data",
         train_fn=lambda samples: None,
     )
 
@@ -81,11 +85,32 @@ def test_pipeline_end_to_end_message_through_training(tmp_path):
         calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=3),
     )
     train_calls = []
+    model_dir = tmp_path / "model_data"
+
+    def _fake_train_fn(samples):
+        # 실제 학습 대신, wrapped_train_fn(pipeline.py)이 학습 직후 곧바로
+        # load_artifact로 다시 불러올 수 있도록 최소한의 유효한 아티팩트만 저장한다.
+        train_calls.append(samples)
+        model = AnomalyGRU(
+            num_tags=1, continuous_indices=[0], binary_indices=[], hidden_size=2, num_layers=1
+        )
+        artifact = ModelArtifact(
+            tags=config.tags,
+            tag_types={"tag_a": "continuous"},
+            norm_stats={"tag_a": (0.0, 1.0)},
+            error_stats={"tag_a": (0.0, 1.0)},
+            window_size=config.window_size,
+            hidden_size=2,
+            num_layers=1,
+            state_dict=model.state_dict(),
+        )
+        save_artifact(model_dir / f"{config.equipment_id}.pt", artifact)
 
     pipeline = build_pipeline(
         config=config,
         calibration_dir=tmp_path / "calibration_data",
-        train_fn=lambda samples: train_calls.append(samples),
+        model_dir=model_dir,
+        train_fn=_fake_train_fn,
     )
 
     payload = json.dumps(
@@ -125,7 +150,10 @@ def test_pipeline_end_to_end_with_real_train_fn(tmp_path, capsys):
         window_size=3,
         calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
     )
-    model_path = tmp_path / "m.pt"
+    model_dir = tmp_path / "model_data"
+    # wrapped_train_fn(pipeline.py)이 학습 직후 model_artifact_path(model_dir, equipment_id)에서
+    # 즉시 다시 읽어들이므로, 여기 model_path도 그 규칙과 일치해야 한다.
+    model_path = model_dir / f"{config.equipment_id}.pt"
     train_fn = make_train_fn(
         tags=config.tags,
         window_size=config.window_size,
@@ -138,6 +166,7 @@ def test_pipeline_end_to_end_with_real_train_fn(tmp_path, capsys):
     pipeline = build_pipeline(
         config=config,
         calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
         train_fn=train_fn,
     )
 
@@ -174,3 +203,160 @@ def test_pipeline_end_to_end_with_real_train_fn(tmp_path, capsys):
     assert model_path.exists(), capsys.readouterr().out
     assert pipeline.calibration_manager.state == CalibrationState.MONITORING
     assert load_artifact(model_path).tags == config.tags
+
+
+def test_pipeline_scores_and_publishes_after_training(tmp_path):
+    config = EquipmentConfig(
+        equipment_id="e2e_score",
+        subscribe_topics=("dx1/e2e_score/data",),
+        publish_topic="jetson/e2e_score/anomaly",
+        command_topic="jetson/e2e_score/cmd",
+        tags=("tag_a", "tag_b"),
+        resample_interval_ms=5,
+        window_size=3,
+        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
+    )
+    model_dir = tmp_path / "model_data"
+    train_fn = make_train_fn(
+        tags=config.tags,
+        window_size=config.window_size,
+        model_path=model_dir / f"{config.equipment_id}.pt",
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+
+    def _send(i):
+        payload = json.dumps(
+            {
+                "records": [
+                    {
+                        "timestamp": "2026-08-04T00:00:00+0000",
+                        "tag_a": float(i),
+                        "tag_b": i % 2,
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        pipeline.mqtt_subscriber._handle_message(None, None, SimpleNamespace(payload=payload))
+
+    pipeline.snapshotter.start()
+    try:
+        for i in range(20):
+            _send(i)
+            time.sleep(0.01)
+    finally:
+        pipeline.snapshotter.stop()
+
+    pipeline.command_subscriber._handle_command_message(
+        None, None, SimpleNamespace(payload=b'{"command": "train"}')
+    )
+    assert pipeline.calibration_manager.state == CalibrationState.MONITORING
+    assert pipeline.inference_engine_holder.get() is not None
+
+    published = []
+    pipeline.mqtt_subscriber.client.publish = lambda topic, payload: published.append(
+        (topic, payload)
+    )
+
+    pipeline.snapshotter.start()
+    try:
+        for i in range(20, 30):
+            _send(i)
+            time.sleep(0.01)
+    finally:
+        pipeline.snapshotter.stop()
+
+    assert published, "MONITORING 진입 후에도 이상 점수가 발행되지 않았다"
+    topic, payload = published[0]
+    assert topic == config.publish_topic
+    record = json.loads(payload)["records"][0]
+    assert "jetson:anomaly_score" in record
+    assert "jetson:alarm" in record
+    assert record["jetson:top_deviant_tag"] in config.tags
+
+
+def test_pipeline_resumes_monitoring_after_restart(tmp_path):
+    config = EquipmentConfig(
+        equipment_id="e2e_resume",
+        subscribe_topics=("dx1/e2e_resume/data",),
+        publish_topic="jetson/e2e_resume/anomaly",
+        command_topic="jetson/e2e_resume/cmd",
+        tags=("tag_a", "tag_b"),
+        resample_interval_ms=5,
+        window_size=3,
+        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
+    )
+    model_dir = tmp_path / "model_data"
+    train_fn = make_train_fn(
+        tags=config.tags,
+        window_size=config.window_size,
+        model_path=model_dir / f"{config.equipment_id}.pt",
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    first.snapshotter.start()
+    try:
+        for i in range(20):
+            payload = json.dumps(
+                {
+                    "records": [
+                        {
+                            "timestamp": "2026-08-04T00:00:00+0000",
+                            "tag_a": float(i),
+                            "tag_b": i % 2,
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+            first.mqtt_subscriber._handle_message(None, None, SimpleNamespace(payload=payload))
+            time.sleep(0.01)
+    finally:
+        first.snapshotter.stop()
+    first.command_subscriber._handle_command_message(
+        None, None, SimpleNamespace(payload=b'{"command": "train"}')
+    )
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+
+    # "재시작": 같은 calibration_dir/model_dir로 파이프라인을 새로 만든다
+    second = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    assert second.calibration_manager.state == CalibrationState.MONITORING
+    assert second.inference_engine_holder.get() is not None
+
+
+def test_pipeline_falls_back_to_calibrating_when_model_file_corrupted(tmp_path):
+    config = _make_config(tmp_path)
+    model_dir = tmp_path / "model_data"
+    model_dir.mkdir(parents=True)
+    (model_dir / f"{config.equipment_id}.pt").write_bytes(b"not a real torch file")
+    StateStore(model_dir / f"{config.equipment_id}.state").write(CalibrationState.MONITORING)
+
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=lambda samples: None,
+    )
+
+    assert pipeline.calibration_manager.state == CalibrationState.CALIBRATING
+    assert pipeline.inference_engine_holder.get() is None

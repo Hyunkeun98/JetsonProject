@@ -89,6 +89,10 @@ class PeriodicSnapshotter:
             self._stop_event.wait(self._interval_seconds)
 
     def start(self) -> None:
+        # stop()이 set()한 이벤트를 지우지 않으면, stop() 이후 재시작된 스레드는
+        # 루프 조건이 이미 참(정지)인 채로 시작해 단 한 번도 tick하지 않는다
+        # (재시작 시나리오: build_pipeline이 학습 완료 후 스코어링을 재개할 때 등).
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 

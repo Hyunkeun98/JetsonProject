@@ -41,6 +41,7 @@ def main() -> None:
         pipeline = build_pipeline(
             config=config,
             calibration_dir=args.calibration_dir,
+            model_dir=args.model_dir,
             train_fn=train_fn,
         )
         pipeline.mqtt_subscriber.connect(args.host, args.port)
