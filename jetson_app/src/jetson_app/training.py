@@ -32,12 +32,16 @@ class ModelArtifact:
     hidden_size: int
     num_layers: int
     state_dict: dict
+    # 학습 때의 리샘플 격자 간격(ms). 0은 격자 정보가 없는 기존 artifact를 뜻하며,
+    # pipeline의 호환성 검사에서 항상 불일치로 처리되어 재학습을 유도한다.
+    resample_interval_ms: int = 0
 
 
 def train_model(
     samples: list[CalibrationSample],
     tags: tuple[str, ...],
     window_size: int,
+    resample_interval_ms: int = 0,
     epochs: int = DEFAULT_EPOCHS,
     hidden_size: int = DEFAULT_HIDDEN_SIZE,
     num_layers: int = DEFAULT_NUM_LAYERS,
@@ -118,6 +122,7 @@ def train_model(
         hidden_size=hidden_size,
         num_layers=num_layers,
         state_dict=model.state_dict(),
+        resample_interval_ms=resample_interval_ms,
     )
 
 
@@ -220,6 +225,7 @@ def save_artifact(path: str | Path, artifact: ModelArtifact) -> None:
             "hidden_size": artifact.hidden_size,
             "num_layers": artifact.num_layers,
             "state_dict": artifact.state_dict,
+            "resample_interval_ms": artifact.resample_interval_ms,
         },
         path,
     )
@@ -236,6 +242,7 @@ def load_artifact(path: str | Path) -> ModelArtifact:
         hidden_size=data["hidden_size"],
         num_layers=data["num_layers"],
         state_dict=data["state_dict"],
+        resample_interval_ms=data.get("resample_interval_ms", 0),
     )
 
 
@@ -243,6 +250,7 @@ def make_train_fn(
     tags: tuple[str, ...],
     window_size: int,
     model_path: str | Path,
+    resample_interval_ms: int,
     epochs: int = DEFAULT_EPOCHS,
     hidden_size: int = DEFAULT_HIDDEN_SIZE,
     num_layers: int = DEFAULT_NUM_LAYERS,
@@ -255,6 +263,7 @@ def make_train_fn(
             samples,
             tags=tags,
             window_size=window_size,
+            resample_interval_ms=resample_interval_ms,
             epochs=epochs,
             hidden_size=hidden_size,
             num_layers=num_layers,

@@ -36,6 +36,7 @@ def main() -> None:
             tags=config.tags,
             window_size=config.window_size,
             model_path=model_path,
+            resample_interval_ms=config.resample_interval_ms,
         )
         pipeline = build_pipeline(
             config=config,

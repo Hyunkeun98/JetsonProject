@@ -126,6 +126,56 @@ def test_save_and_load_artifact_round_trip(tmp_path: Path):
     assert loaded.state_dict.keys() == artifact.state_dict.keys()
 
 
+def test_train_model_records_resample_interval_in_artifact():
+    artifact = train_model(
+        _make_samples(30),
+        tags=("a", "b"),
+        window_size=3,
+        resample_interval_ms=100,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+    assert artifact.resample_interval_ms == 100
+
+
+def test_save_and_load_artifact_preserves_resample_interval(tmp_path: Path):
+    artifact = train_model(
+        _make_samples(30),
+        tags=("a", "b"),
+        window_size=3,
+        resample_interval_ms=100,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+    path = tmp_path / "model.pt"
+    save_artifact(path, artifact)
+
+    assert load_artifact(path).resample_interval_ms == 100
+
+
+def test_load_artifact_without_grid_info_defaults_to_zero(tmp_path: Path):
+    # 격자 정보가 생기기 전에 저장된 기존 artifact: pipeline이 항상 불일치로 처리하도록 0
+    artifact = train_model(
+        _make_samples(30),
+        tags=("a", "b"),
+        window_size=3,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+    path = tmp_path / "legacy.pt"
+    save_artifact(path, artifact)
+    import torch as _torch
+
+    data = _torch.load(path, weights_only=False)
+    del data["resample_interval_ms"]
+    _torch.save(data, path)
+
+    assert load_artifact(path).resample_interval_ms == 0
+
+
 def test_make_train_fn_trains_and_saves(tmp_path: Path):
     samples = _make_samples(30)
     model_path = tmp_path / "line_A.pt"
@@ -133,6 +183,7 @@ def test_make_train_fn_trains_and_saves(tmp_path: Path):
         tags=("a", "b"),
         window_size=3,
         model_path=model_path,
+        resample_interval_ms=50,
         epochs=2,
         hidden_size=4,
         num_layers=1,
@@ -141,6 +192,7 @@ def test_make_train_fn_trains_and_saves(tmp_path: Path):
     assert model_path.exists()
     loaded = load_artifact(model_path)
     assert loaded.tags == ("a", "b")
+    assert loaded.resample_interval_ms == 50
 
 
 import torch
