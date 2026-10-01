@@ -66,8 +66,8 @@ class _FakePublisher:
     def __init__(self):
         self.published = []
 
-    def publish(self, timestamp, anomaly_score, alarm, top_deviant_tag):
-        self.published.append((timestamp, anomaly_score, alarm, top_deviant_tag))
+    def publish(self, timestamp, anomaly_score, alarm, top_deviant_tag, groups=None):
+        self.published.append((timestamp, anomaly_score, alarm, top_deviant_tag, groups))
 
 
 def _filled_window(size, count):
@@ -77,12 +77,16 @@ def _filled_window(size, count):
     return window
 
 
-def _processor(window, manager, engine=None, debouncer=None, publisher=None, **kwargs):
+def _processor(
+    window, manager, engine=None, debouncer=None, publisher=None, debouncers=None, **kwargs
+):
+    if debouncers is None and debouncer is not None:
+        debouncers = {"all": debouncer}
     return SnapshotProcessor(
         sliding_window=window,
         calibration_manager=manager,
         inference_engine_holder=_FakeHolder(engine) if engine is not None else None,
-        debouncer=debouncer,
+        debouncers=debouncers,
         result_publisher=publisher,
         **kwargs,
     )
@@ -130,7 +134,7 @@ def test_process_scores_with_pre_push_window_and_publishes_with_event_time():
     assert scored_window == pre_push_window  # push되기 *전* 윈도우로 채점됐는지 확인
     assert scored_actual.values == {"a": 99.0}
     assert debouncer.scores == [5.0]
-    timestamp, anomaly_score, alarm, top_deviant_tag = publisher.published[0]
+    timestamp, anomaly_score, alarm, top_deviant_tag, _groups = publisher.published[0]
     assert timestamp == format_epoch_ns(step.epoch_ns)  # 현재 시각이 아니라 이벤트 시각
     assert (anomaly_score, alarm, top_deviant_tag) == (5.0, True, "a")
     assert manager.recorded[0][1] == format_epoch_ns(step.epoch_ns)
@@ -297,3 +301,108 @@ def test_calibration_timestamps_are_parseable_by_prune(tmp_path):
 
     sample = writer.read_all()[0]
     assert datetime.fromisoformat(sample.timestamp).tzinfo is not None
+
+
+# ---- 그룹별 알람 ----
+
+from jetson_app.debounce import Debouncer
+from jetson_app.inference import GroupResult
+
+
+def _grouped_result(a_score, b_score):
+    return AnomalyResult(
+        anomaly_score=max(a_score, b_score),
+        top_deviant_tag="tag_a" if a_score >= b_score else "tag_b",
+        group_results={
+            "A": GroupResult(score=a_score, top_tag="tag_a"),
+            "B": GroupResult(score=b_score, top_tag="tag_b"),
+        },
+    )
+
+
+def test_group_alarms_are_independent_and_overall_alarm_is_their_or():
+    window = _filled_window(2, 2)
+    manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    engine = _FakeEngine(_grouped_result(a_score=5.0, b_score=0.1))
+    publisher = _FakePublisher()
+    debouncers = {
+        "A": Debouncer(threshold=3.0, confirm_ticks=2),
+        "B": Debouncer(threshold=3.0, confirm_ticks=2),
+    }
+    processor = _processor(window, manager, engine, publisher=publisher, debouncers=debouncers)
+
+    processor.process(_step(2))
+    first_alarm = publisher.published[-1][2]
+    processor.process(_step(3))
+    timestamp, anomaly_score, alarm, top_deviant_tag, groups = publisher.published[-1]
+
+    assert first_alarm is False  # 연속 2번째 스텝부터 확정
+    assert alarm is True
+    assert (anomaly_score, top_deviant_tag) == (5.0, "tag_a")
+    assert groups["A"].alarm is True and groups["A"].score == 5.0 and groups["A"].top_tag == "tag_a"
+    assert groups["B"].alarm is False and groups["B"].score == 0.1
+
+
+def test_overall_alarm_is_false_when_no_group_alarm_is_confirmed():
+    window = _filled_window(2, 2)
+    manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    engine = _FakeEngine(_grouped_result(a_score=1.0, b_score=0.5))
+    publisher = _FakePublisher()
+    debouncers = {"A": Debouncer(confirm_ticks=1), "B": Debouncer(confirm_ticks=1)}
+    processor = _processor(window, manager, engine, publisher=publisher, debouncers=debouncers)
+
+    processor.process(_step(2))
+
+    assert publisher.published[-1][2] is False
+
+
+def test_one_groups_over_threshold_streak_does_not_leak_into_another_group():
+    window = _filled_window(2, 2)
+    manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    results = iter(
+        [
+            _grouped_result(a_score=5.0, b_score=0.1),
+            _grouped_result(a_score=0.1, b_score=5.0),
+        ]
+    )
+
+    class _SequenceEngine:
+        def score(self, window, actual):
+            return next(results)
+
+    publisher = _FakePublisher()
+    debouncers = {
+        "A": Debouncer(threshold=3.0, confirm_ticks=2),
+        "B": Debouncer(threshold=3.0, confirm_ticks=2),
+    }
+    processor = SnapshotProcessor(
+        sliding_window=window,
+        calibration_manager=manager,
+        inference_engine_holder=_FakeHolder(_SequenceEngine()),
+        debouncers=debouncers,
+        result_publisher=publisher,
+    )
+
+    processor.process(_step(2))
+    processor.process(_step(3))
+
+    groups = publisher.published[-1][4]
+    assert groups["A"].alarm is False  # A: 초과 후 정상으로 돌아와 연속이 끊김
+    assert groups["B"].alarm is False  # B: 마지막 스텝에서 처음 초과했을 뿐
+
+
+def test_reset_window_resets_every_group_debouncer():
+    window = _filled_window(3, 3)
+    manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    first, second = _FakeDebouncer(False), _FakeDebouncer(False)
+    processor = _processor(
+        window,
+        manager,
+        _FakeEngine(_grouped_result(1.0, 1.0)),
+        publisher=_FakePublisher(),
+        debouncers={"A": first, "B": second},
+    )
+
+    processor.process(_step(10, 7.0, reset_window=True))
+
+    assert (first.reset_calls, second.reset_calls) == (1, 1)

@@ -71,3 +71,49 @@ def test_publish_does_not_log_on_success_rc(capsys):
     publisher.publish("ts", 1.0, False, "tag1")
 
     assert capsys.readouterr().out == ""
+
+
+def test_publish_adds_group_fields_when_there_are_multiple_groups():
+    from jetson_app.publisher import GroupOutput
+
+    client = _FakeClient()
+    publisher = ResultPublisher(client=client, publish_topic="t")
+    publisher.publish(
+        "ts",
+        4.2,
+        True,
+        "NX5_AxisData:AxZ_Act_Trq",
+        groups={
+            "process_4": GroupOutput(score=4.2, alarm=True, top_tag="NX5_AxisData:AxZ_Act_Trq"),
+            "general": GroupOutput(score=0.1, alarm=False, top_tag="NX5_SenData:ConvSensor0"),
+        },
+    )
+
+    record = json.loads(client.published[0][1])["records"][0]
+    assert record["jetson:anomaly_score"] == 4.2
+    assert record["jetson:alarm"] is True
+    assert record["jetson:top_deviant_tag"] == "NX5_AxisData:AxZ_Act_Trq"
+    assert record["jetson:process_4:score"] == 4.2
+    assert record["jetson:process_4:alarm"] is True
+    assert record["jetson:process_4:top_tag"] == "NX5_AxisData:AxZ_Act_Trq"
+    assert record["jetson:general:score"] == 0.1
+    assert record["jetson:general:alarm"] is False
+    assert record["jetson:general:top_tag"] == "NX5_SenData:ConvSensor0"
+
+
+def test_publish_keeps_the_original_schema_for_a_single_group():
+    from jetson_app.publisher import GroupOutput
+
+    client = _FakeClient()
+    publisher = ResultPublisher(client=client, publish_topic="t")
+    publisher.publish(
+        "ts", 1.0, False, "tag1", groups={"all": GroupOutput(score=1.0, alarm=False, top_tag="tag1")}
+    )
+
+    record = json.loads(client.published[0][1])["records"][0]
+    assert set(record) == {
+        "timestamp",
+        "jetson:anomaly_score",
+        "jetson:alarm",
+        "jetson:top_deviant_tag",
+    }

@@ -7,8 +7,8 @@ from .buffer import SlidingWindow
 from .calibration import CalibrationManager, CalibrationState
 from .debounce import Debouncer
 from .droplog import DropCounter
-from .inference import ActiveModelHolder
-from .publisher import ResultPublisher
+from .inference import ActiveModelHolder, GroupResult
+from .publisher import GroupOutput, ResultPublisher
 from .resampler import ResampledStep
 from .timeparse import format_epoch_ns
 
@@ -31,14 +31,14 @@ class SnapshotProcessor:
         sliding_window: SlidingWindow,
         calibration_manager: CalibrationManager,
         inference_engine_holder: ActiveModelHolder | None = None,
-        debouncer: Debouncer | None = None,
+        debouncers: dict[str, Debouncer] | None = None,
         result_publisher: ResultPublisher | None = None,
         max_queue_size: int = _DEFAULT_MAX_QUEUE_SIZE,
     ) -> None:
         self._sliding_window = sliding_window
         self._calibration_manager = calibration_manager
         self._inference_engine_holder = inference_engine_holder
-        self._debouncer = debouncer
+        self._debouncers = debouncers
         self._result_publisher = result_publisher
         self._queue = queue.Queue(maxsize=max_queue_size)
         self._dropped = DropCounter("snapshot_processor: 처리가 밀려 폐기한 스냅샷")
@@ -78,8 +78,8 @@ class SnapshotProcessor:
             # 통신 단절 등으로 윈도우 길이를 넘는 공백이 있었다: 공백 앞뒤를 이어 붙인
             # 윈도우로 학습/추론하지 않도록 비우고, 연속 초과 카운터도 되돌린다.
             self._sliding_window.clear()
-            if self._debouncer is not None:
-                self._debouncer.reset()
+            for debouncer in (self._debouncers or {}).values():
+                debouncer.reset()
         snapshot = step.snapshot
         timestamp = format_epoch_ns(step.epoch_ns)
 
@@ -101,7 +101,7 @@ class SnapshotProcessor:
         # 처리에 삼켜져 매 스텝 로그만 쏟아진다.
         if (
             self._inference_engine_holder is None
-            or self._debouncer is None
+            or self._debouncers is None
             or self._result_publisher is None
         ):
             return
@@ -115,9 +115,21 @@ class SnapshotProcessor:
         result = engine.score(self._sliding_window.to_list(), snapshot)
         if result is None:
             return
-        alarm = self._debouncer.update(result.anomaly_score)
+        # 그룹 구성이 없는 결과(평면 설정)는 전체 점수를 단일 그룹 "all"로 본다.
+        group_results = result.group_results or {
+            "all": GroupResult(score=result.anomaly_score, top_tag=result.top_deviant_tag)
+        }
+        outputs = {
+            name: GroupOutput(
+                score=group.score,
+                alarm=self._debouncers[name].update(group.score),
+                top_tag=group.top_tag,
+            )
+            for name, group in group_results.items()
+        }
+        alarm = any(output.alarm for output in outputs.values())
         self._result_publisher.publish(
-            timestamp, result.anomaly_score, alarm, result.top_deviant_tag
+            timestamp, result.anomaly_score, alarm, result.top_deviant_tag, outputs
         )
 
     def _process_safely(self, step: ResampledStep) -> None:

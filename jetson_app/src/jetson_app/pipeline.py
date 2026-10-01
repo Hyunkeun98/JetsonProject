@@ -129,7 +129,7 @@ def build_pipeline(
         sliding_window=sliding_window,
         calibration_manager=calibration_manager,
         inference_engine_holder=inference_engine_holder,
-        debouncer=debouncer,
+        debouncers={"all": debouncer},
         result_publisher=result_publisher,
     )
 
