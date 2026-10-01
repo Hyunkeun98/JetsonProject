@@ -7,6 +7,9 @@ from .buffer import Snapshot
 from .droplog import DropCounter
 from .mqtt_subscriber import Record
 
+# 확정된 칸보다 "크게" 뒤처진 record가 이만큼 연속으로 오면 DX1 시계가 뒤로 보정된 것으로 본다.
+_RESYNC_AFTER_FAR_BEHIND = 10
+
 
 @dataclass(frozen=True)
 class ResampledStep:
@@ -48,6 +51,9 @@ class EventTimeResampler:
         self._max_ns: int | None = None
         self._next_bucket: int | None = None  # 다음에 방출할 칸. 첫 방출 전에는 None
         self._reset_pending = False
+        # 지연 허용 + 윈도우 길이보다 더 뒤처진 record는 단순 지연이 아니라 시계 문제로 본다.
+        self._resync_buckets = self._lateness_ns // self._interval_ns + window_size
+        self._behind_streak = 0
         self._late = DropCounter("resampler: 확정된 칸보다 늦게 도착해 폐기한 record")
 
     @property
@@ -58,9 +64,24 @@ class EventTimeResampler:
         """record를 반영하고, 이 record 때문에 새로 확정된 스텝들을 시간순으로 반환한다."""
         with self._lock:
             bucket = record.epoch_ns // self._interval_ns
-            if self._next_bucket is not None and bucket < self._next_bucket:
-                self._late.add()
-                return []
+            far_behind = (
+                self._next_bucket is not None
+                and bucket < self._next_bucket - self._resync_buckets
+            )
+            if far_behind:
+                # 한두 개는 잘못된 타임스탬프로 보고 버린다. 연속으로 오면 DX1 시계가
+                # 앞으로 점프했다가 보정된 것이므로, 계속 버리면 점프한 시간만큼 데이터가
+                # 끊긴다 -> 새 시각을 기준으로 재동기화한다.
+                self._behind_streak += 1
+                if self._behind_streak < _RESYNC_AFTER_FAR_BEHIND:
+                    self._late.add()
+                    return []
+                self._resync()
+            else:
+                self._behind_streak = 0
+                if self._next_bucket is not None and bucket < self._next_bucket:
+                    self._late.add()
+                    return []
             tracked = {t: v for t, v in record.values.items() if t in self._tag_set}
             if not tracked:
                 return []
@@ -72,6 +93,17 @@ class EventTimeResampler:
             if self._max_ns is None or record.epoch_ns > self._max_ns:
                 self._max_ns = record.epoch_ns
             return self._drain()
+
+    def _resync(self) -> None:
+        print(
+            f"[resampler] 이벤트 시각이 {_RESYNC_AFTER_FAR_BEHIND}개 연속으로 이전 시각보다 "
+            "크게 뒤로 돌아가 시계가 보정된 것으로 보고 재동기화한다"
+        )
+        self._pending.clear()
+        self._max_ns = None
+        self._next_bucket = None
+        self._reset_pending = True
+        self._behind_streak = 0
 
     def _drain(self) -> list[ResampledStep]:
         closed_below = (self._max_ns - self._lateness_ns) // self._interval_ns

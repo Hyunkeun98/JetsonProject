@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Callable, List
@@ -143,7 +143,9 @@ class CalibrationManager:
             self._buffer_writer.append(snapshot, timestamp)
             self._tick_count += 1
             if self._tick_count % _PRUNE_CHECK_INTERVAL == 0:
-                cutoff = datetime.now(timezone.utc) - self._max_duration
+                # 이벤트 시각(DX1 시계) 기준으로 정리한다. Jetson 현재 시각과 비교하면 두
+                # 시계가 크게 다를 때 버퍼가 통째로 지워지거나 영원히 커진다.
+                cutoff = datetime.fromisoformat(timestamp) - self._max_duration
                 self._buffer_writer.prune_older_than(cutoff)
 
     def handle_train_command(self) -> None:

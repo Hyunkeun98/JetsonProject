@@ -128,3 +128,44 @@ def test_record_far_in_the_past_after_emission_is_dropped():
     feed(r, [rec(0, a=1), rec(100, a=2), rec(200, a=3)])
     assert r.add(rec(-86_400_000, a=9)) == []
     assert r.late_dropped == 1
+
+
+def test_sustained_clock_step_back_resyncs_instead_of_blacking_out():
+    # DX1 시계가 앞으로 점프했다가 NTP 보정으로 원래대로 돌아오면, 보정된 시각의 record가
+    # 앞으로 점프한 시간만큼 전부 폐기되어 데이터가 끊기면 안 된다.
+    r = make(window_size=5)
+    hour_ms = 3_600_000
+    feed(r, [rec(0, a=1), rec(100, a=1), rec(200, a=1)])
+    feed(r, [rec(10 * hour_ms, a=2), rec(10 * hour_ms + 100, a=2)])
+
+    steps = feed(r, [rec(1_000 + i * 100, a=3) for i in range(30)])
+
+    assert len(steps) >= 15
+    assert steps[0].reset_window is True
+    assert steps[0].epoch_ns == 1_900_000_000  # 보정 후 10번째 record의 칸에서 재개
+    assert r.late_dropped == 9
+
+
+def test_lone_far_past_record_does_not_reset_the_stream():
+    r = make(window_size=5)
+    feed(r, [rec(0, a=1), rec(100, a=1), rec(200, a=1)])
+
+    assert r.add(rec(-86_400_000, a=9)) == []
+    steps = feed(r, [rec(300, a=2), rec(400, a=2)])
+
+    assert [s.reset_window for s in steps] == [False, False]
+    assert r.late_dropped == 1
+
+
+def test_far_past_records_interleaved_with_normal_ones_never_resync():
+    r = make(window_size=5)
+    feed(r, [rec(0, a=1), rec(100, a=1), rec(200, a=1)])
+    for _ in range(9):
+        r.add(rec(-86_400_000, a=9))
+    r.add(rec(300, a=2))  # 정상 범위의 record가 끼면 연속 횟수가 처음부터 다시 센다
+    for _ in range(9):
+        r.add(rec(-86_400_000, a=9))
+    steps = feed(r, [rec(400, a=2)])
+
+    assert all(s.reset_window is False for s in steps)
+    assert r.late_dropped == 18

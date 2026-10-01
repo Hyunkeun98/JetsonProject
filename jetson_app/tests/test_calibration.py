@@ -206,3 +206,38 @@ def test_calibration_manager_persists_state_on_recalibrate(tmp_path: Path):
     )
     manager.handle_recalibrate_command()
     assert StateStore(state_path).read() == CalibrationState.CALIBRATING
+
+
+def _manager_with_small_prune_interval(tmp_path, monkeypatch):
+    monkeypatch.setattr("jetson_app.calibration._PRUNE_CHECK_INTERVAL", 3)
+    writer = CalibrationBufferWriter(tmp_path / "buf.jsonl")
+    manager = CalibrationManager(
+        buffer_writer=writer,
+        min_samples=1,
+        max_duration=timedelta(days=7),
+        train_fn=lambda samples: None,
+        state_store=StateStore(tmp_path / "state"),
+    )
+    return manager, writer
+
+
+def test_prune_does_not_depend_on_jetson_wall_clock(tmp_path, monkeypatch):
+    # DX1 시계가 Jetson 시계와 크게 달라도(여기서는 2020년) 캘리브레이션 버퍼를 비우면 안 된다.
+    manager, writer = _manager_with_small_prune_interval(tmp_path, monkeypatch)
+
+    for i in range(3):
+        manager.record_sample(Snapshot(values={"a": i}), "2020-01-01T00:00:0%d+00:00" % i)
+
+    assert writer.count() == 3
+
+
+def test_prune_drops_samples_older_than_max_duration_before_latest_event_time(
+    tmp_path, monkeypatch
+):
+    manager, writer = _manager_with_small_prune_interval(tmp_path, monkeypatch)
+
+    manager.record_sample(Snapshot(values={"a": 0}), "2020-01-01T00:00:00+00:00")
+    manager.record_sample(Snapshot(values={"a": 1}), "2020-01-02T00:00:00+00:00")
+    manager.record_sample(Snapshot(values={"a": 2}), "2020-01-20T00:00:00+00:00")
+
+    assert [s.values["a"] for s in writer.read_all()] == [2]
