@@ -13,8 +13,13 @@ dependencies = [
     "torch<2.4",
 ]
 
+[project.optional-dependencies]
+# 설정 생성 도구(jetson-datalist)가 엑셀을 읽을 때만 필요하다. 런타임(Jetson)에는 불필요.
+tools = ["openpyxl>=3.1"]
+
 [project.scripts]
 jetson-app = "jetson_app.subscriber_cli:main"
+jetson-datalist = "jetson_app.datalist_to_config:main"
 
 [build-system]
 requires = ["uv_build>=0.11.21,<0.12.0"]
@@ -23,4 +28,5 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=7,<8",
+    "openpyxl>=3.1",
 ]

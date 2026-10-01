@@ -1,0 +1,98 @@
+# jetson-datalist로 생성한 설정 초안: DataList.xlsx
+equipment_id: nx5
+mqtt:
+  subscribe_topics:
+  - dx1/TaktTime
+  - dx1/ProcStart
+  - dx1/AxisData
+  - dx1/SenData
+  publish_topic: jetson/nx5/anomaly
+  command_topic: jetson/nx5/cmd
+groups:
+  process_0:
+    state_tag: NX5_ProcStart:U0_ProcStart
+    tags:
+    - NX5_TaktTime:U0_TaktTime
+    - NX5_ProcStart:U0_ProcStart
+    - NX5_AxisData:AxX_Act_Pos
+    - NX5_AxisData:AxX_Act_Vel
+    - NX5_AxisData:AxX_Act_Trq
+  process_1:
+    state_tag: NX5_ProcStart:U1_ProcStart
+    tags:
+    - NX5_TaktTime:U1_TaktTime
+    - NX5_ProcStart:U1_ProcStart
+  process_2:
+    state_tag: NX5_ProcStart:U2_ProcStart
+    tags:
+    - NX5_TaktTime:U2_TaktTime
+    - NX5_ProcStart:U2_ProcStart
+  process_3:
+    state_tag: NX5_ProcStart:U3_ProcStart
+    tags:
+    - NX5_TaktTime:U3_TaktTime
+    - NX5_ProcStart:U3_ProcStart
+  process_4:
+    state_tag: NX5_ProcStart:U4_ProcStart
+    tags:
+    - NX5_TaktTime:U4_TaktTime
+    - NX5_ProcStart:U4_ProcStart
+    - NX5_AxisData:AxZ_Act_Pos
+    - NX5_AxisData:AxZ_Act_Vel
+    - NX5_AxisData:AxZ_Act_Trq
+  process_5:
+    state_tag: NX5_ProcStart:U5_ProcStart
+    tags:
+    - NX5_TaktTime:U5_TaktTime
+    - NX5_ProcStart:U5_ProcStart
+  process_6:
+    state_tag: NX5_ProcStart:U6_ProcStart
+    tags:
+    - NX5_TaktTime:U6_TaktTime
+    - NX5_ProcStart:U6_ProcStart
+  process_7:
+    state_tag: NX5_ProcStart:U7_ProcStart
+    tags:
+    - NX5_TaktTime:U7_TaktTime
+    - NX5_ProcStart:U7_ProcStart
+  process_8:
+    state_tag: NX5_ProcStart:U8_ProcStart
+    tags:
+    - NX5_TaktTime:U8_TaktTime
+    - NX5_ProcStart:U8_ProcStart
+  process_9:
+    state_tag: NX5_ProcStart:U9_ProcStart
+    tags:
+    - NX5_TaktTime:U9_TaktTime
+    - NX5_ProcStart:U9_ProcStart
+    - NX5_AxisData:AxCV_Act_Pos
+    - NX5_AxisData:AxCV_Act_Vel
+    - NX5_AxisData:AxCV_Act_Trq
+  process_10:
+    state_tag: NX5_ProcStart:U10_ProcStart
+    tags:
+    - NX5_TaktTime:U10_TaktTime
+    - NX5_ProcStart:U10_ProcStart
+  general:
+    tags:
+    - NX5_SenData:ConvSensor0
+    - NX5_SenData:ConvSensor1
+    - NX5_SenData:ConvSensor2
+    - NX5_SenData:ConvSensor3
+    - NX5_SenData:ConvSensor4
+    - NX5_SenData:ConvSensor5
+    - NX5_SenData:ConvSensor6
+    - NX5_SenData:ConvSensor7
+    - NX5_SenData:ConvSensor8
+    - NX5_SenData:ConvSensor9
+    - NX5_SenData:ConvSensor10
+    - NX5_SenData:ConvAct0
+    - NX5_SenData:ConvAct1
+    - NX5_SenData:ConvAct2
+    - NX5_SenData:ConvAct3
+resample_interval_ms: 100
+max_lateness_ms: 500
+window_size: 30
+calibration:
+  max_duration: 7d
+  min_samples: 3000
