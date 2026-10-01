@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -12,9 +12,17 @@ from .training import ModelArtifact, compute_raw_errors, normalize_continuous_co
 
 
 @dataclass(frozen=True)
+class GroupResult:
+    score: float
+    top_tag: str
+
+
+@dataclass(frozen=True)
 class AnomalyResult:
     anomaly_score: float
     top_deviant_tag: str
+    # 그룹 이름 -> 그룹 점수/원인 태그. 그룹 구성이 없으면 모든 태그를 한 그룹 "all"로 본다.
+    group_results: dict = field(default_factory=dict)
 
 
 class InferenceEngine:
@@ -37,6 +45,14 @@ class InferenceEngine:
         )
         self._model.load_state_dict(artifact.state_dict)
         self._model.eval()
+        self._groups = artifact.groups or {"all": (None, artifact.tags)}
+        # 태그 -> 그 태그가 속한 그룹의 상태 태그(동작 중 신호). 상태 태그가 없으면 항목 없음.
+        self._state_tag_of = {
+            tag: state_tag
+            for state_tag, tags in self._groups.values()
+            if state_tag is not None
+            for tag in tags
+        }
 
     def score(self, window: list[Snapshot], actual: Snapshot) -> AnomalyResult | None:
         """window(길이 window_size, 오래된→최신 순)로 다음 시점을 예측하고, 실제로
@@ -73,17 +89,47 @@ class InferenceEngine:
             batch_size=1,
         )
 
+        actual_values = dict(zip(self._tags, actual_row))
+        z_by_tag: dict[str, float] = {}
         best_tag: str | None = None
         best_z: float | None = None
         for tag, err_tensor in raw_errors.items():
             raw_error = err_tensor.item()
-            error_mean, error_std = self._artifact.error_stats[tag]
+            error_mean, error_std = self._stats_for(
+                tag, actual_values.get(self._state_tag_of.get(tag))
+            )
             z = (raw_error - error_mean) / error_std
+            z_by_tag[tag] = z
             if best_z is None or z > best_z:
                 best_z = z
                 best_tag = tag
 
-        return AnomalyResult(anomaly_score=best_z, top_deviant_tag=best_tag)
+        group_results: dict[str, GroupResult] = {}
+        for name, (_state_tag, group_tags) in self._groups.items():
+            group_best_tag: str | None = None
+            group_best_z: float | None = None
+            for tag in group_tags:
+                z = z_by_tag.get(tag)
+                if z is not None and (group_best_z is None or z > group_best_z):
+                    group_best_z = z
+                    group_best_tag = tag
+            if group_best_tag is not None:
+                group_results[name] = GroupResult(score=group_best_z, top_tag=group_best_tag)
+
+        return AnomalyResult(
+            anomaly_score=best_z, top_deviant_tag=best_tag, group_results=group_results
+        )
+
+    def _stats_for(self, tag: str, state_value: float | None) -> tuple[float, float]:
+        """태그의 정상 오차 (평균, 표준편차). 상태 태그가 있는 그룹의 태그는 현재 상태(동작 중/
+        대기 중)에 맞는 통계를 쓰고, 상태를 모르거나 그 상태의 통계가 없으면(표본 부족으로
+        학습 때 대체됨) 전체 통계를 쓴다."""
+        regime = self._artifact.regime_error_stats.get(tag)
+        if regime and state_value is not None:
+            stats = regime.get("on" if state_value >= 0.5 else "off")
+            if stats is not None:
+                return stats[0], stats[1]
+        return self._artifact.error_stats[tag]
 
 
 class ActiveModelHolder:
