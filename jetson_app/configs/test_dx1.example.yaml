@@ -12,7 +12,8 @@ tags:
   - "PLC_Collector_Axis_Status_3:AxX_VelDemVal"
   # 실제 DX1이 내보내는 "Collector명:신호명" 형식의 태그명으로 채우세요.
   # PLC 내부 카운터(PosTimestamp 등)는 분석 대상이 아니므로 여기 적지 않습니다.
-resample_interval_ms: 50
+resample_interval_ms: 50   # 모델이 보는 시간 간격. DX1 취득 주기(Collector 주기)에 맞춰 직접 지정한다.
+max_lateness_ms: 2000      # 토픽 간 도착 시차를 기다리는 시간. 토픽 중 가장 긴 배치 간격보다 크게 잡는다. 결과 발행은 이만큼 지연된다.
 window_size: 100
 calibration:
   max_duration: "7d"

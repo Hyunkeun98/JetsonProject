@@ -142,6 +142,36 @@ def test_load_equipment_config_missing_file_raises_config_error(tmp_path):
         load_equipment_config(tmp_path / "does-not-exist.yaml")
 
 
+def test_max_lateness_ms_defaults_to_2000_when_omitted(tmp_path):
+    config_path = tmp_path / "test_dx1.yaml"
+    config_path.write_text(SAMPLE_YAML, encoding="utf-8")
+
+    assert load_equipment_config(config_path).max_lateness_ms == 2000
+
+
+def test_max_lateness_ms_is_read_from_config(tmp_path):
+    config_path = tmp_path / "test_dx1.yaml"
+    config_path.write_text(SAMPLE_YAML + "max_lateness_ms: 500\n", encoding="utf-8")
+
+    assert load_equipment_config(config_path).max_lateness_ms == 500
+
+
+def test_max_lateness_ms_zero_is_allowed(tmp_path):
+    config_path = tmp_path / "test_dx1.yaml"
+    config_path.write_text(SAMPLE_YAML + "max_lateness_ms: 0\n", encoding="utf-8")
+
+    assert load_equipment_config(config_path).max_lateness_ms == 0
+
+
+@pytest.mark.parametrize("bad_value", ["-1", "1.5", '"2s"', "true", "null"])
+def test_max_lateness_ms_rejects_invalid_values(tmp_path, bad_value):
+    config_path = tmp_path / "test_dx1.yaml"
+    config_path.write_text(SAMPLE_YAML + "max_lateness_ms: %s\n" % bad_value, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="max_lateness_ms"):
+        load_equipment_config(config_path)
+
+
 def test_load_equipment_config_loads_shipped_example_config():
     from pathlib import Path
 

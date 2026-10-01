@@ -8,6 +8,9 @@ from pathlib import Path
 import yaml
 
 
+DEFAULT_MAX_LATENESS_MS = 2000
+
+
 class ConfigError(ValueError):
     pass
 
@@ -48,6 +51,7 @@ class EquipmentConfig:
     resample_interval_ms: int
     window_size: int
     calibration: CalibrationConfig
+    max_lateness_ms: int = DEFAULT_MAX_LATENESS_MS
 
 
 def load_equipment_config(path: str | Path) -> EquipmentConfig:
@@ -92,6 +96,10 @@ def load_equipment_config(path: str | Path) -> EquipmentConfig:
     if not isinstance(window_size, int) or isinstance(window_size, bool) or window_size <= 0:
         raise ConfigError("window_size must be a positive integer")
 
+    max_lateness_ms = data.get("max_lateness_ms", DEFAULT_MAX_LATENESS_MS)
+    if not isinstance(max_lateness_ms, int) or isinstance(max_lateness_ms, bool) or max_lateness_ms < 0:
+        raise ConfigError("max_lateness_ms must be a non-negative integer")
+
     calibration_section = data["calibration"]
     if not isinstance(calibration_section, dict):
         raise ConfigError("calibration section must be a mapping")
@@ -115,4 +123,5 @@ def load_equipment_config(path: str | Path) -> EquipmentConfig:
         resample_interval_ms=resample_interval_ms,
         window_size=window_size,
         calibration=CalibrationConfig(max_duration=max_duration, min_samples=min_samples),
+        max_lateness_ms=max_lateness_ms,
     )
