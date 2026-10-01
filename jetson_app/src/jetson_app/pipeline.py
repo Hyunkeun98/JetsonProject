@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .buffer import SlidingWindow, TagBuffer
+from .buffer import SlidingWindow
 from .calibration import (
     CalibrationBufferWriter,
     CalibrationManager,
@@ -18,18 +18,19 @@ from .debounce import Debouncer
 from .inference import ActiveModelHolder, InferenceEngine
 from .mqtt_subscriber import MqttRecordSubscriber, Record
 from .publisher import ResultPublisher
-from .scheduler import PeriodicSnapshotter
+from .resampler import EventTimeResampler
+from .snapshot_processor import SnapshotProcessor
 from .training import ModelArtifact, load_artifact, model_artifact_path, state_marker_path
 
 
 @dataclass(frozen=True)
 class Pipeline:
     config: EquipmentConfig
-    tag_buffer: TagBuffer
+    resampler: EventTimeResampler
     sliding_window: SlidingWindow
     calibration_manager: CalibrationManager
     inference_engine_holder: ActiveModelHolder
-    snapshotter: PeriodicSnapshotter
+    snapshotter: SnapshotProcessor
     mqtt_subscriber: MqttRecordSubscriber
     command_subscriber: CommandSubscriber
 
@@ -40,11 +41,18 @@ def build_pipeline(
     model_dir: str | Path,
     train_fn: TrainFn,
 ) -> Pipeline:
-    tag_buffer = TagBuffer(config.tags)
+    resampler = EventTimeResampler(
+        tags=config.tags,
+        interval_ms=config.resample_interval_ms,
+        max_lateness_ms=config.max_lateness_ms,
+        window_size=config.window_size,
+    )
     sliding_window = SlidingWindow(config.window_size)
 
     def on_record(record: Record) -> None:
-        tag_buffer.update(record.values)
+        # 리샘플러가 이 record로 새로 확정한 격자 칸들을 처리 스레드의 큐로 넘긴다.
+        # MQTT 스레드는 큐에 넣기만 하고, 점수 계산은 처리 스레드가 한다.
+        snapshotter.submit(resampler.add(record))
 
     mqtt_subscriber = MqttRecordSubscriber(config, on_record=on_record)
     result_publisher = ResultPublisher(
@@ -66,25 +74,34 @@ def build_pipeline(
     debouncer = Debouncer()
 
     def _check_artifact_matches_config(artifact: ModelArtifact) -> None:
-        """설정 YAML의 window_size/tags가 학습 이후 바뀌면 모델은 정상적으로 로드되지만
-        InferenceEngine.score()가 매 틱 None을 반환해 아무 것도 발행하지 않는다
-        (겉보기 상태는 정상 MONITORING). 손상된 모델 파일과 동일하게 취급한다."""
-        if artifact.window_size != config.window_size or set(artifact.tags) != set(config.tags):
+        """설정 YAML의 window_size/tags/resample_interval_ms가 학습 이후 바뀌면 모델은
+        정상적으로 로드되지만 InferenceEngine.score()가 매 스텝 None을 반환하거나
+        (window_size/tags), 학습 때와 다른 시간 간격의 윈도우로 엉뚱한 점수를 낸다
+        (resample_interval_ms). 겉보기 상태는 정상 MONITORING이므로, 손상된 모델 파일과
+        동일하게 취급한다. 격자 정보가 없는 기존 artifact(resample_interval_ms=0)도
+        여기서 걸러져 재학습을 유도한다."""
+        if (
+            artifact.window_size != config.window_size
+            or set(artifact.tags) != set(config.tags)
+            or artifact.resample_interval_ms != config.resample_interval_ms
+        ):
             raise ValueError(
                 f"model artifact incompatible with current config: "
                 f"window_size {artifact.window_size} vs {config.window_size}, "
-                f"tags {artifact.tags} vs {config.tags}"
+                f"tags {artifact.tags} vs {config.tags}, "
+                f"resample_interval_ms {artifact.resample_interval_ms} vs "
+                f"{config.resample_interval_ms}"
             )
 
     def wrapped_train_fn(samples: list[CalibrationSample]) -> None:
         train_fn(samples)
-        # 학습이 방금 성공적으로 저장한 모델을 즉시 메모리에 올려, 다음 틱부터
+        # 학습이 방금 성공적으로 저장한 모델을 즉시 메모리에 올려, 다음 스텝부터
         # 바로 채점을 시작할 수 있게 한다 (재시작을 기다릴 필요 없음).
         artifact = load_artifact(model_path)
         _check_artifact_matches_config(artifact)
         inference_engine_holder.set(InferenceEngine(artifact))
         # 새 모델은 오차 통계가 완전히 다르므로, 이전 모델 점수로 쌓인 연속 초과
-        # 카운터를 물려받아 첫 틱부터 알람이 확정되는 일이 없도록 리셋한다.
+        # 카운터를 물려받아 첫 스텝부터 알람이 확정되는 일이 없도록 리셋한다.
         debouncer.reset()
 
     calibration_manager = CalibrationManager(
@@ -108,11 +125,9 @@ def build_pipeline(
             print(f"[build_pipeline] 모델 로드 실패, CALIBRATING으로 폴백: {e}")
             calibration_manager.handle_recalibrate_command()
 
-    snapshotter = PeriodicSnapshotter(
-        tag_buffer=tag_buffer,
+    snapshotter = SnapshotProcessor(
         sliding_window=sliding_window,
         calibration_manager=calibration_manager,
-        interval_ms=config.resample_interval_ms,
         inference_engine_holder=inference_engine_holder,
         debouncer=debouncer,
         result_publisher=result_publisher,
@@ -123,7 +138,7 @@ def build_pipeline(
 
     return Pipeline(
         config=config,
-        tag_buffer=tag_buffer,
+        resampler=resampler,
         sliding_window=sliding_window,
         calibration_manager=calibration_manager,
         inference_engine_holder=inference_engine_holder,

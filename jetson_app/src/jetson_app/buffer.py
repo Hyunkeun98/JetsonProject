@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 from collections import deque
 from dataclasses import dataclass
 
@@ -8,29 +7,6 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Snapshot:
     values: dict[str, float | int | None]
-
-
-class TagBuffer:
-    """설정된 태그들의 최신값을 스레드세이프하게 유지하는 캐시.
-
-    한 번 값이 들어오면, 다음 update()가 오기 전까지 snapshot()은 계속
-    같은 값을 반환한다 (짧은 결측에 대한 ffill은 이 특성으로 자연히 만족된다).
-    """
-
-    def __init__(self, tags: tuple[str, ...]) -> None:
-        self._tags = tags
-        self._lock = threading.Lock()
-        self._latest: dict[str, float | int] = {}
-
-    def update(self, values: dict[str, float | int]) -> None:
-        with self._lock:
-            for tag, value in values.items():
-                if tag in self._tags:
-                    self._latest[tag] = value
-
-    def snapshot(self) -> Snapshot:
-        with self._lock:
-            return Snapshot(values={tag: self._latest.get(tag) for tag in self._tags})
 
 
 class SlidingWindow:

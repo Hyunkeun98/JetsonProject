@@ -87,7 +87,7 @@ class InferenceEngine:
 
 
 class ActiveModelHolder:
-    """PeriodicSnapshotter(매 틱, 읽기)와 학습 완료 콜백(train 명령 시, 쓰기)이 서로
+    """SnapshotProcessor(매 스텝, 읽기)와 학습 완료 콜백(train 명령 시, 쓰기)이 서로
     다른 스레드에서 접근하는 현재 InferenceEngine을 스레드세이프하게 공유한다."""
 
     def __init__(self) -> None:

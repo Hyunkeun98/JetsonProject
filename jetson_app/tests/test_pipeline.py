@@ -1,12 +1,12 @@
 import json
-import time
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from jetson_app.calibration import CalibrationState, StateStore
 from jetson_app.config import CalibrationConfig, EquipmentConfig
 from jetson_app.model import AnomalyGRU
+from jetson_app.mqtt_subscriber import Record
 from jetson_app.pipeline import build_pipeline
 from jetson_app.training import ModelArtifact, load_artifact, make_train_fn, save_artifact
 
@@ -21,6 +21,61 @@ def _make_config(tmp_path):
         resample_interval_ms=50,
         window_size=10,
         calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
+    )
+
+
+def _e2e_config(equipment_id, tags=("tag_a", "tag_b"), window_size=3, min_samples=10):
+    # 격자 5ms, 지연 허용 0ms: 테스트에서 칸이 다음 record가 도착하는 즉시 확정된다.
+    return EquipmentConfig(
+        equipment_id=equipment_id,
+        subscribe_topics=(f"dx1/{equipment_id}/data",),
+        publish_topic=f"jetson/{equipment_id}/anomaly",
+        command_topic=f"jetson/{equipment_id}/cmd",
+        tags=tags,
+        resample_interval_ms=5,
+        window_size=window_size,
+        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=min_samples),
+        max_lateness_ms=0,
+    )
+
+
+def _ts(i, step_ms=5):
+    """i번째 격자 칸의 DX1 형식 타임스탬프(나노초 9자리, +0000)."""
+    moment = datetime(2026, 8, 4, tzinfo=timezone.utc) + timedelta(milliseconds=i * step_ms)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f") + "000+0000"
+
+
+def _send(pipeline, i, tags):
+    """i번째 시점의 record 하나를 담은 MQTT 메시지를 구독자에 직접 전달한다.
+    첫 태그는 연속값(float(i)), 나머지는 0/1(i % 2)."""
+    record = {"timestamp": _ts(i)}
+    for j, tag in enumerate(tags):
+        record[tag] = float(i) if j == 0 else i % 2
+    payload = json.dumps({"records": [record]}).encode("utf-8")
+    pipeline.mqtt_subscriber._handle_message(None, None, SimpleNamespace(payload=payload))
+
+
+def _feed(pipeline, tags, start, stop):
+    for i in range(start, stop):
+        _send(pipeline, i, tags)
+    pipeline.snapshotter.process_pending()
+
+
+def _train_fn_for(config, model_dir):
+    return make_train_fn(
+        tags=config.tags,
+        window_size=config.window_size,
+        model_path=model_dir / f"{config.equipment_id}.pt",
+        resample_interval_ms=config.resample_interval_ms,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+
+
+def _send_train(pipeline):
+    pipeline.command_subscriber._handle_command_message(
+        None, None, SimpleNamespace(payload=b'{"command": "train"}')
     )
 
 
@@ -52,40 +107,30 @@ def test_build_pipeline_command_subscriber_shares_calibration_manager(tmp_path):
     assert pipeline.command_subscriber._calibration_manager is pipeline.calibration_manager
 
 
-def test_build_pipeline_on_record_updates_tag_buffer(tmp_path):
-    config = _make_config(tmp_path)
+def test_build_pipeline_on_record_feeds_resampler_and_processor(tmp_path):
+    config = replace(_make_config(tmp_path), max_lateness_ms=0)
     pipeline = build_pipeline(
         config=config,
         calibration_dir=tmp_path / "calibration_data",
         model_dir=tmp_path / "model_data",
         train_fn=lambda samples: None,
     )
-
-    from jetson_app.mqtt_subscriber import Record
+    tag = "PLC_Collector_Actuator_1:AirBlower.Cmd[0]"
 
     pipeline.mqtt_subscriber._on_record(
-        Record(
-            timestamp="2026-08-04T00:00:00+00:00",
-            values={"PLC_Collector_Actuator_1:AirBlower.Cmd[0]": 1},
-            epoch_ns=0,
-        )
+        Record(timestamp="2026-08-04T00:00:00+00:00", values={tag: 1}, epoch_ns=0)
     )
+    pipeline.mqtt_subscriber._on_record(
+        Record(timestamp="2026-08-04T00:00:00.050+00:00", values={tag: 0}, epoch_ns=50_000_000)
+    )
+    pipeline.snapshotter.process_pending()
 
-    snapshot = pipeline.tag_buffer.snapshot()
-    assert snapshot.values["PLC_Collector_Actuator_1:AirBlower.Cmd[0]"] == 1
+    # 두 번째 record가 첫 칸(0~50ms)을 확정시켰고, 그 칸의 값은 1이다.
+    assert [s.values[tag] for s in pipeline.sliding_window.to_list()] == [1]
 
 
 def test_pipeline_end_to_end_message_through_training(tmp_path):
-    config = EquipmentConfig(
-        equipment_id="e2e_test",
-        subscribe_topics=("dx1/e2e_test/data",),
-        publish_topic="jetson/e2e_test/anomaly",
-        command_topic="jetson/e2e_test/cmd",
-        tags=("tag_a",),
-        resample_interval_ms=5,
-        window_size=10,
-        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=3),
-    )
+    config = _e2e_config("e2e_test", tags=("tag_a",), min_samples=3)
     train_calls = []
     model_dir = tmp_path / "model_data"
 
@@ -105,6 +150,7 @@ def test_pipeline_end_to_end_message_through_training(tmp_path):
             hidden_size=2,
             num_layers=1,
             state_dict=model.state_dict(),
+            resample_interval_ms=config.resample_interval_ms,
         )
         save_artifact(model_dir / f"{config.equipment_id}.pt", artifact)
 
@@ -115,153 +161,117 @@ def test_pipeline_end_to_end_message_through_training(tmp_path):
         train_fn=_fake_train_fn,
     )
 
+    # 한 메시지에 시점이 다른 record 5개(배치) -> 마지막 칸을 뺀 4칸이 확정된다
     payload = json.dumps(
-        {"records": [{"timestamp": "2026-08-04T00:00:00+0000", "tag_a": 42}]}
+        {"records": [{"timestamp": _ts(i), "tag_a": 42} for i in range(5)]}
     ).encode("utf-8")
     pipeline.mqtt_subscriber._handle_message(None, None, SimpleNamespace(payload=payload))
-
-    pipeline.snapshotter.start()
-    time.sleep(0.1)
-    pipeline.snapshotter.stop()
+    pipeline.snapshotter.process_pending()
 
     buffer_path = tmp_path / "calibration_data" / "e2e_test.jsonl"
     assert buffer_path.exists()
     recorded_lines = buffer_path.read_text(encoding="utf-8").strip().splitlines()
-    assert len(recorded_lines) >= 3
+    assert len(recorded_lines) == 4
 
-    pipeline.command_subscriber._handle_command_message(
-        None, None, SimpleNamespace(payload=b'{"command": "train"}')
-    )
+    _send_train(pipeline)
 
     assert len(train_calls) == 1
     assert pipeline.calibration_manager.state == CalibrationState.MONITORING
     assert not buffer_path.exists()
 
 
+def test_pipeline_batch_message_keeps_every_record_at_its_own_timestamp(tmp_path):
+    config = replace(
+        _e2e_config("e2e_batch", tags=("tag_a",), min_samples=1000),
+        resample_interval_ms=100,
+    )
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=tmp_path / "model_data",
+        train_fn=lambda samples: None,
+    )
+    # DX1가 100ms 주기로 취득한 값 10개를 한 메시지로 묶어 보내고, 다음 메시지가 이어진다
+    first = {"records": [{"timestamp": _ts(i, 100), "tag_a": i} for i in range(10)]}
+    second = {"records": [{"timestamp": _ts(10, 100), "tag_a": 10}]}
+    for message in (first, second):
+        payload = json.dumps(message).encode("utf-8")
+        pipeline.mqtt_subscriber._handle_message(None, None, SimpleNamespace(payload=payload))
+    pipeline.snapshotter.process_pending()
+
+    lines = (tmp_path / "calibration_data" / "e2e_batch.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    rows = [json.loads(line) for line in lines]
+    assert [row["values"]["tag_a"] for row in rows] == list(range(10))
+    stamps = [datetime.fromisoformat(row["timestamp"]) for row in rows]
+    assert [b - a for a, b in zip(stamps, stamps[1:])] == [timedelta(milliseconds=100)] * 9
+
+
+def test_pipeline_worker_thread_processes_messages_end_to_end(tmp_path):
+    config = _e2e_config("e2e_thread", tags=("tag_a",))
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=tmp_path / "model_data",
+        train_fn=lambda samples: None,
+    )
+
+    pipeline.snapshotter.start()
+    for i in range(6):
+        _send(pipeline, i, config.tags)
+    pipeline.snapshotter.stop()
+
+    lines = (tmp_path / "calibration_data" / "e2e_thread.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(lines) == 5
+
+
 def test_pipeline_end_to_end_with_real_train_fn(tmp_path, capsys):
     """subscriber_cli가 하는 것과 동일한 방식으로 make_train_fn을 배선해,
     MQTT 메시지 → 스냅샷 → train 명령 → 모델 파일 저장까지 실제로 도는지 확인한다.
     (command_subscriber가 예외를 삼키므로 배선 버그는 이 경로 없이는 안 잡힌다.)"""
-    config = EquipmentConfig(
-        equipment_id="e2e_train",
-        subscribe_topics=("dx1/e2e_train/data",),
-        publish_topic="jetson/e2e_train/anomaly",
-        command_topic="jetson/e2e_train/cmd",
-        tags=("tag_a", "tag_b"),
-        resample_interval_ms=5,
-        window_size=3,
-        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
-    )
+    config = _e2e_config("e2e_train")
     model_dir = tmp_path / "model_data"
     # wrapped_train_fn(pipeline.py)이 학습 직후 model_artifact_path(model_dir, equipment_id)에서
     # 즉시 다시 읽어들이므로, 여기 model_path도 그 규칙과 일치해야 한다.
     model_path = model_dir / f"{config.equipment_id}.pt"
-    train_fn = make_train_fn(
-        tags=config.tags,
-        window_size=config.window_size,
-        model_path=model_path,
-        resample_interval_ms=config.resample_interval_ms,
-        epochs=1,
-        hidden_size=4,
-        num_layers=1,
-    )
-
     pipeline = build_pipeline(
         config=config,
         calibration_dir=tmp_path / "calibration_data",
         model_dir=model_dir,
-        train_fn=train_fn,
+        train_fn=_train_fn_for(config, model_dir),
     )
 
-    pipeline.snapshotter.start()
-    try:
-        for i in range(20):
-            payload = json.dumps(
-                {
-                    "records": [
-                        {
-                            "timestamp": "2026-08-04T00:00:00+0000",
-                            "tag_a": float(i),
-                            "tag_b": i % 2,
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-            pipeline.mqtt_subscriber._handle_message(
-                None, None, SimpleNamespace(payload=payload)
-            )
-            time.sleep(0.01)
-    finally:
-        pipeline.snapshotter.stop()
+    _feed(pipeline, config.tags, 0, 20)
 
     buffer_path = tmp_path / "calibration_data" / "e2e_train.jsonl"
     recorded_lines = buffer_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(recorded_lines) >= config.calibration.min_samples
 
-    pipeline.command_subscriber._handle_command_message(
-        None, None, SimpleNamespace(payload=b'{"command": "train"}')
-    )
+    _send_train(pipeline)
 
     # 학습이 실패하면 command_subscriber가 예외를 삼키므로 원인을 출력에서 보여준다
     assert model_path.exists(), capsys.readouterr().out
     assert pipeline.calibration_manager.state == CalibrationState.MONITORING
-    assert load_artifact(model_path).tags == config.tags
+    artifact = load_artifact(model_path)
+    assert artifact.tags == config.tags
+    assert artifact.resample_interval_ms == config.resample_interval_ms
 
 
 def test_pipeline_scores_and_publishes_after_training(tmp_path):
-    config = EquipmentConfig(
-        equipment_id="e2e_score",
-        subscribe_topics=("dx1/e2e_score/data",),
-        publish_topic="jetson/e2e_score/anomaly",
-        command_topic="jetson/e2e_score/cmd",
-        tags=("tag_a", "tag_b"),
-        resample_interval_ms=5,
-        window_size=3,
-        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
-    )
+    config = _e2e_config("e2e_score")
     model_dir = tmp_path / "model_data"
-    train_fn = make_train_fn(
-        tags=config.tags,
-        window_size=config.window_size,
-        model_path=model_dir / f"{config.equipment_id}.pt",
-        resample_interval_ms=config.resample_interval_ms,
-        epochs=1,
-        hidden_size=4,
-        num_layers=1,
-    )
-
     pipeline = build_pipeline(
         config=config,
         calibration_dir=tmp_path / "calibration_data",
         model_dir=model_dir,
-        train_fn=train_fn,
+        train_fn=_train_fn_for(config, model_dir),
     )
 
-    def _send(i):
-        payload = json.dumps(
-            {
-                "records": [
-                    {
-                        "timestamp": "2026-08-04T00:00:00+0000",
-                        "tag_a": float(i),
-                        "tag_b": i % 2,
-                    }
-                ]
-            }
-        ).encode("utf-8")
-        pipeline.mqtt_subscriber._handle_message(None, None, SimpleNamespace(payload=payload))
-
-    pipeline.snapshotter.start()
-    try:
-        for i in range(20):
-            _send(i)
-            time.sleep(0.01)
-    finally:
-        pipeline.snapshotter.stop()
-
-    pipeline.command_subscriber._handle_command_message(
-        None, None, SimpleNamespace(payload=b'{"command": "train"}')
-    )
+    _feed(pipeline, config.tags, 0, 20)
+    _send_train(pipeline)
     assert pipeline.calibration_manager.state == CalibrationState.MONITORING
     assert pipeline.inference_engine_holder.get() is not None
 
@@ -273,13 +283,7 @@ def test_pipeline_scores_and_publishes_after_training(tmp_path):
 
     pipeline.mqtt_subscriber.client.publish = _fake_publish
 
-    pipeline.snapshotter.start()
-    try:
-        for i in range(20, 30):
-            _send(i)
-            time.sleep(0.01)
-    finally:
-        pipeline.snapshotter.stop()
+    _feed(pipeline, config.tags, 20, 30)
 
     assert published, "MONITORING 진입 후에도 이상 점수가 발행되지 않았다"
     topic, payload = published[0]
@@ -291,26 +295,9 @@ def test_pipeline_scores_and_publishes_after_training(tmp_path):
 
 
 def test_pipeline_resumes_monitoring_after_restart(tmp_path):
-    config = EquipmentConfig(
-        equipment_id="e2e_resume",
-        subscribe_topics=("dx1/e2e_resume/data",),
-        publish_topic="jetson/e2e_resume/anomaly",
-        command_topic="jetson/e2e_resume/cmd",
-        tags=("tag_a", "tag_b"),
-        resample_interval_ms=5,
-        window_size=3,
-        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
-    )
+    config = _e2e_config("e2e_resume")
     model_dir = tmp_path / "model_data"
-    train_fn = make_train_fn(
-        tags=config.tags,
-        window_size=config.window_size,
-        model_path=model_dir / f"{config.equipment_id}.pt",
-        resample_interval_ms=config.resample_interval_ms,
-        epochs=1,
-        hidden_size=4,
-        num_layers=1,
-    )
+    train_fn = _train_fn_for(config, model_dir)
 
     first = build_pipeline(
         config=config,
@@ -318,27 +305,8 @@ def test_pipeline_resumes_monitoring_after_restart(tmp_path):
         model_dir=model_dir,
         train_fn=train_fn,
     )
-    first.snapshotter.start()
-    try:
-        for i in range(20):
-            payload = json.dumps(
-                {
-                    "records": [
-                        {
-                            "timestamp": "2026-08-04T00:00:00+0000",
-                            "tag_a": float(i),
-                            "tag_b": i % 2,
-                        }
-                    ]
-                }
-            ).encode("utf-8")
-            first.mqtt_subscriber._handle_message(None, None, SimpleNamespace(payload=payload))
-            time.sleep(0.01)
-    finally:
-        first.snapshotter.stop()
-    first.command_subscriber._handle_command_message(
-        None, None, SimpleNamespace(payload=b'{"command": "train"}')
-    )
+    _feed(first, config.tags, 0, 20)
+    _send_train(first)
     assert first.calibration_manager.state == CalibrationState.MONITORING
 
     # "재시작": 같은 calibration_dir/model_dir로 파이프라인을 새로 만든다
@@ -353,50 +321,18 @@ def test_pipeline_resumes_monitoring_after_restart(tmp_path):
 
 
 def _feed_and_train(pipeline, tags, count=20):
-    """MQTT 메시지를 흘려 캘리브레이션 버퍼를 채운 뒤 train 명령까지 보낸다
-    (test_pipeline_resumes_monitoring_after_restart의 절차를 그대로 따른다)."""
-    pipeline.snapshotter.start()
-    try:
-        for i in range(count):
-            record = {"timestamp": "2026-08-04T00:00:00+0000"}
-            for j, tag in enumerate(tags):
-                record[tag] = float(i) if j == 0 else i % 2
-            payload = json.dumps({"records": [record]}).encode("utf-8")
-            pipeline.mqtt_subscriber._handle_message(
-                None, None, SimpleNamespace(payload=payload)
-            )
-            time.sleep(0.01)
-    finally:
-        pipeline.snapshotter.stop()
-    pipeline.command_subscriber._handle_command_message(
-        None, None, SimpleNamespace(payload=b'{"command": "train"}')
-    )
+    """MQTT 메시지를 흘려 캘리브레이션 버퍼를 채운 뒤 train 명령까지 보낸다."""
+    _feed(pipeline, tags, 0, count)
+    _send_train(pipeline)
 
 
 def test_pipeline_falls_back_to_calibrating_when_config_window_size_changed(tmp_path):
     """모델 학습 후 config의 window_size가 바뀌면, 모델은 정상 로드되지만
-    InferenceEngine.score()가 매 틱 None을 반환해 아무 것도 발행하지 않는다.
+    InferenceEngine.score()가 매 스텝 None을 반환해 아무 것도 발행하지 않는다.
     손상된 모델 파일과 동일하게 CALIBRATING으로 폴백해야 한다."""
-    config = EquipmentConfig(
-        equipment_id="e2e_wsmismatch",
-        subscribe_topics=("dx1/e2e_wsmismatch/data",),
-        publish_topic="jetson/e2e_wsmismatch/anomaly",
-        command_topic="jetson/e2e_wsmismatch/cmd",
-        tags=("tag_a", "tag_b"),
-        resample_interval_ms=5,
-        window_size=3,
-        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
-    )
+    config = _e2e_config("e2e_wsmismatch")
     model_dir = tmp_path / "model_data"
-    train_fn = make_train_fn(
-        tags=config.tags,
-        window_size=config.window_size,
-        model_path=model_dir / f"{config.equipment_id}.pt",
-        resample_interval_ms=config.resample_interval_ms,
-        epochs=1,
-        hidden_size=4,
-        num_layers=1,
-    )
+    train_fn = _train_fn_for(config, model_dir)
 
     first = build_pipeline(
         config=config,
@@ -421,26 +357,9 @@ def test_pipeline_falls_back_to_calibrating_when_config_window_size_changed(tmp_
 
 
 def test_pipeline_falls_back_to_calibrating_when_config_tags_changed(tmp_path):
-    config = EquipmentConfig(
-        equipment_id="e2e_tagmismatch",
-        subscribe_topics=("dx1/e2e_tagmismatch/data",),
-        publish_topic="jetson/e2e_tagmismatch/anomaly",
-        command_topic="jetson/e2e_tagmismatch/cmd",
-        tags=("tag_a", "tag_b"),
-        resample_interval_ms=5,
-        window_size=3,
-        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
-    )
+    config = _e2e_config("e2e_tagmismatch")
     model_dir = tmp_path / "model_data"
-    train_fn = make_train_fn(
-        tags=config.tags,
-        window_size=config.window_size,
-        model_path=model_dir / f"{config.equipment_id}.pt",
-        resample_interval_ms=config.resample_interval_ms,
-        epochs=1,
-        hidden_size=4,
-        num_layers=1,
-    )
+    train_fn = _train_fn_for(config, model_dir)
 
     first = build_pipeline(
         config=config,
@@ -464,30 +383,75 @@ def test_pipeline_falls_back_to_calibrating_when_config_tags_changed(tmp_path):
     assert second.inference_engine_holder.get() is None
 
 
+def test_pipeline_falls_back_to_calibrating_when_resample_interval_changed(tmp_path):
+    """학습 때와 다른 격자 간격으로 윈도우를 만들면 모델 입력의 시간 간격이 달라져
+    점수가 무의미해진다. window_size/tags가 바뀐 경우와 마찬가지로 CALIBRATING 폴백."""
+    config = _e2e_config("e2e_gridmismatch")
+    model_dir = tmp_path / "model_data"
+    train_fn = _train_fn_for(config, model_dir)
+
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    _feed_and_train(first, config.tags)
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+
+    changed = replace(config, resample_interval_ms=10)
+    second = build_pipeline(
+        config=changed,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+
+    assert second.calibration_manager.state == CalibrationState.CALIBRATING
+    assert second.inference_engine_holder.get() is None
+
+
+def test_pipeline_falls_back_to_calibrating_for_artifact_without_grid_info(tmp_path):
+    """격자 정보가 없는 기존 artifact(resample_interval_ms=0)는 어떤 config와도 호환되지
+    않는 것으로 보고 재학습하게 한다."""
+    config = _e2e_config("e2e_legacy_artifact", tags=("tag_a",))
+    model_dir = tmp_path / "model_data"
+    model = AnomalyGRU(
+        num_tags=1, continuous_indices=[0], binary_indices=[], hidden_size=2, num_layers=1
+    )
+    save_artifact(
+        model_dir / f"{config.equipment_id}.pt",
+        ModelArtifact(
+            tags=config.tags,
+            tag_types={"tag_a": "continuous"},
+            norm_stats={"tag_a": (0.0, 1.0)},
+            error_stats={"tag_a": (0.0, 1.0)},
+            window_size=config.window_size,
+            hidden_size=2,
+            num_layers=1,
+            state_dict=model.state_dict(),
+        ),
+    )
+    StateStore(model_dir / f"{config.equipment_id}.state").write(CalibrationState.MONITORING)
+
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=lambda samples: None,
+    )
+
+    assert pipeline.calibration_manager.state == CalibrationState.CALIBRATING
+    assert pipeline.inference_engine_holder.get() is None
+
+
 def test_pipeline_stays_calibrating_after_recalibrate_even_though_model_file_remains(tmp_path):
     """recalibrate는 의도적으로 모델 파일을 지우지 않고 상태 마커만 되돌린다.
     그 직후 재시작하면 남아있는 모델로 MONITORING을 재개하는 게 아니라
     CALIBRATING에 머물러야 한다."""
-    config = EquipmentConfig(
-        equipment_id="e2e_recal_restart",
-        subscribe_topics=("dx1/e2e_recal_restart/data",),
-        publish_topic="jetson/e2e_recal_restart/anomaly",
-        command_topic="jetson/e2e_recal_restart/cmd",
-        tags=("tag_a", "tag_b"),
-        resample_interval_ms=5,
-        window_size=3,
-        calibration=CalibrationConfig(max_duration=timedelta(days=7), min_samples=10),
-    )
+    config = _e2e_config("e2e_recal_restart")
     model_dir = tmp_path / "model_data"
-    train_fn = make_train_fn(
-        tags=config.tags,
-        window_size=config.window_size,
-        model_path=model_dir / f"{config.equipment_id}.pt",
-        resample_interval_ms=config.resample_interval_ms,
-        epochs=1,
-        hidden_size=4,
-        num_layers=1,
-    )
+    train_fn = _train_fn_for(config, model_dir)
 
     first = build_pipeline(
         config=config,
