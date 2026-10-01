@@ -203,3 +203,139 @@ def test_parse_duration_invalid_format_raises():
         parse_duration("7")
     with pytest.raises(ConfigError):
         parse_duration("7x")
+
+
+GROUPS_YAML = """\
+equipment_id: "nx5"
+mqtt:
+  subscribe_topics: ["dx1/AxisData", "dx1/ProcStart"]
+  publish_topic: "jetson/nx5/anomaly"
+  command_topic: "jetson/nx5/cmd"
+groups:
+  process_0:
+    state_tag: "P:U0_ProcStart"
+    tags: ["P:U0_ProcStart", "A:AxX_Act_Pos"]
+  process_4:
+    state_tag: "P:U4_ProcStart"
+    tags: ["P:U4_ProcStart", "A:AxZ_Act_Pos", "T:U4_TaktTime"]
+  general:
+    tags: ["S:ConvSensor0"]
+resample_interval_ms: 100
+window_size: 30
+calibration:
+  max_duration: "7d"
+  min_samples: 3000
+"""
+
+
+def _load_text(tmp_path, text):
+    config_path = tmp_path / "cfg.yaml"
+    config_path.write_text(text, encoding="utf-8")
+    return load_equipment_config(config_path)
+
+
+def _groups_yaml_with(replacement_groups_block):
+    head, _, tail = GROUPS_YAML.partition("groups:\n")
+    _, _, rest = tail.partition("resample_interval_ms")
+    return head + replacement_groups_block + "resample_interval_ms" + rest
+
+
+def test_groups_are_parsed_in_declaration_order_and_tags_are_concatenated(tmp_path):
+    config = _load_text(tmp_path, GROUPS_YAML)
+
+    assert [g.name for g in config.groups] == ["process_0", "process_4", "general"]
+    assert config.groups[0].state_tag == "P:U0_ProcStart"
+    assert config.groups[0].tags == ("P:U0_ProcStart", "A:AxX_Act_Pos")
+    assert config.groups[2].state_tag is None
+    assert config.tags == (
+        "P:U0_ProcStart",
+        "A:AxX_Act_Pos",
+        "P:U4_ProcStart",
+        "A:AxZ_Act_Pos",
+        "T:U4_TaktTime",
+        "S:ConvSensor0",
+    )
+    assert config.resolved_groups() == config.groups
+
+
+def test_flat_tags_config_resolves_to_a_single_all_group(tmp_path):
+    config = _load_text(tmp_path, SAMPLE_YAML)
+
+    assert config.groups == ()
+    resolved = config.resolved_groups()
+    assert len(resolved) == 1
+    assert (resolved[0].name, resolved[0].state_tag, resolved[0].tags) == ("all", None, config.tags)
+
+
+def test_tags_and_groups_together_are_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="tags.*groups|groups.*tags"):
+        _load_text(tmp_path, GROUPS_YAML + 'tags: ["x"]\n')
+
+
+def test_neither_tags_nor_groups_is_rejected(tmp_path):
+    text = GROUPS_YAML.replace("groups:", "ignored_key:")
+    with pytest.raises(ConfigError, match="tags.*groups|groups.*tags"):
+        _load_text(tmp_path, text)
+
+
+@pytest.mark.parametrize("block", ["groups: []\n", "groups: {}\n", "groups: 3\n"])
+def test_groups_must_be_a_non_empty_mapping(tmp_path, block):
+    with pytest.raises(ConfigError, match="groups"):
+        _load_text(tmp_path, _groups_yaml_with(block))
+
+
+def test_group_with_empty_or_missing_tags_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="process_0"):
+        _load_text(tmp_path, _groups_yaml_with("groups:\n  process_0:\n    tags: []\n"))
+    with pytest.raises(ConfigError, match="process_0"):
+        _load_text(tmp_path, _groups_yaml_with("groups:\n  process_0:\n    state_tag: x\n"))
+
+
+def test_tag_in_two_groups_is_rejected(tmp_path):
+    block = 'groups:\n  a:\n    tags: ["x", "y"]\n  b:\n    tags: ["y"]\n'
+    with pytest.raises(ConfigError, match="y"):
+        _load_text(tmp_path, _groups_yaml_with(block))
+
+
+def test_state_tag_must_be_one_of_the_group_tags(tmp_path):
+    block = 'groups:\n  a:\n    state_tag: "z"\n    tags: ["x", "y"]\n'
+    with pytest.raises(ConfigError, match="state_tag"):
+        _load_text(tmp_path, _groups_yaml_with(block))
+
+
+def test_alarm_and_training_defaults(tmp_path):
+    config = _load_text(tmp_path, SAMPLE_YAML)
+
+    assert config.alarm.threshold == 3.0
+    assert config.alarm.confirm_steps == 3
+    assert config.training.max_samples == 20_000
+    assert config.training.epochs == 20
+
+
+def test_alarm_and_training_values_are_read(tmp_path):
+    text = SAMPLE_YAML + "alarm: {threshold: 4.5, confirm_steps: 5}\ntraining: {max_samples: 60000, epochs: 8}\n"
+    config = _load_text(tmp_path, text)
+
+    assert (config.alarm.threshold, config.alarm.confirm_steps) == (4.5, 5)
+    assert (config.training.max_samples, config.training.epochs) == (60000, 8)
+
+
+@pytest.mark.parametrize(
+    "extra,needle",
+    [
+        ("alarm: {threshold: 0}", "alarm.threshold"),
+        ("alarm: {threshold: -1}", "alarm.threshold"),
+        ('alarm: {threshold: "x"}', "alarm.threshold"),
+        ("alarm: {threshold: true}", "alarm.threshold"),
+        ("alarm: {confirm_steps: 0}", "alarm.confirm_steps"),
+        ("alarm: {confirm_steps: 1.5}", "alarm.confirm_steps"),
+        ("alarm: 3", "alarm"),
+        ("training: {max_samples: 0}", "training.max_samples"),
+        ("training: {epochs: false}", "training.epochs"),
+        ("training: {epochs: -2}", "training.epochs"),
+        ("training: []", "training"),
+    ],
+)
+def test_invalid_alarm_or_training_values_are_rejected(tmp_path, extra, needle):
+    with pytest.raises(ConfigError, match=needle):
+        _load_text(tmp_path, SAMPLE_YAML + extra + "\n")

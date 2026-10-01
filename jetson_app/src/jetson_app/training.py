@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from .calibration import CalibrationSample, TrainFn
+from .config import DEFAULT_EPOCHS, DEFAULT_MAX_TRAINING_SAMPLES
 from .model import AnomalyGRU
 from .tag_stats import compute_normalization_stats, detect_tag_types, type_indices
 from .windowing import build_windows
@@ -14,12 +15,7 @@ from .windowing import build_windows
 DEFAULT_HIDDEN_SIZE = 64
 DEFAULT_NUM_LAYERS = 2
 DEFAULT_LEARNING_RATE = 1e-3
-DEFAULT_EPOCHS = 20
 DEFAULT_BATCH_SIZE = 64
-# 캘리브레이션 버퍼는 calibration.max_duration까지 자라기 때문에(예: 7d @ 50ms ≈ 12M 샘플)
-# 전체를 윈도잉하면 수 GB 텐서가 되어 4GB Jetson에서 OOM이 난다.
-# 학습에는 가장 최근 구간만 쓴다.
-DEFAULT_MAX_TRAINING_SAMPLES = 20_000
 
 
 @dataclass(frozen=True)
