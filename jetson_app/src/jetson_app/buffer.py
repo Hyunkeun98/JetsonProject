@@ -49,6 +49,9 @@ class SlidingWindow:
     def push(self, snapshot: Snapshot) -> None:
         self._items.append(snapshot)
 
+    def clear(self) -> None:
+        self._items.clear()
+
     def is_full(self) -> bool:
         return len(self._items) == self._window_size
 

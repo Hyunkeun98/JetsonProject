@@ -68,3 +68,14 @@ def test_sliding_window_drops_oldest_when_over_capacity():
     window.push(s3)
 
     assert window.to_list() == [s2, s3]
+
+
+def test_sliding_window_clear_empties_the_window():
+    window = SlidingWindow(window_size=2)
+    window.push(Snapshot(values={"a": 1}))
+    window.push(Snapshot(values={"a": 2}))
+
+    window.clear()
+
+    assert window.to_list() == []
+    assert window.is_full() is False
