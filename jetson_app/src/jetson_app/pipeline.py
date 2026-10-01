@@ -71,26 +71,35 @@ def build_pipeline(
     state_store = StateStore(state_path)
 
     inference_engine_holder = ActiveModelHolder()
-    debouncer = Debouncer()
+    group_specs = config.group_specs()
+    # 그룹마다 독립된 디바운서: 한 그룹의 연속 초과가 다른 그룹의 알람 확정에 영향을 주지 않는다.
+    debouncers = {
+        name: Debouncer(
+            threshold=config.alarm.threshold, confirm_ticks=config.alarm.confirm_steps
+        )
+        for name in group_specs
+    }
 
     def _check_artifact_matches_config(artifact: ModelArtifact) -> None:
-        """설정 YAML의 window_size/tags/resample_interval_ms가 학습 이후 바뀌면 모델은
+        """설정 YAML의 window_size/tags/resample_interval_ms/그룹 구성이 학습 이후 바뀌면 모델은
         정상적으로 로드되지만 InferenceEngine.score()가 매 스텝 None을 반환하거나
-        (window_size/tags), 학습 때와 다른 시간 간격의 윈도우로 엉뚱한 점수를 낸다
-        (resample_interval_ms). 겉보기 상태는 정상 MONITORING이므로, 손상된 모델 파일과
-        동일하게 취급한다. 격자 정보가 없는 기존 artifact(resample_interval_ms=0)도
-        여기서 걸러져 재학습을 유도한다."""
+        (window_size/tags), 학습 때와 다른 시간 간격의 윈도우로 엉뚱한 점수를 내거나
+        (resample_interval_ms), 그룹 점수/상태별 기준이 현재 설정과 어긋난다(groups).
+        겉보기 상태는 정상 MONITORING이므로, 손상된 모델 파일과 동일하게 취급한다.
+        격자 정보나 그룹 정보가 없는 기존 artifact도 여기서 걸러져 재학습을 유도한다."""
         if (
             artifact.window_size != config.window_size
             or set(artifact.tags) != set(config.tags)
             or artifact.resample_interval_ms != config.resample_interval_ms
+            or artifact.groups != group_specs
         ):
             raise ValueError(
                 f"model artifact incompatible with current config: "
                 f"window_size {artifact.window_size} vs {config.window_size}, "
                 f"tags {artifact.tags} vs {config.tags}, "
                 f"resample_interval_ms {artifact.resample_interval_ms} vs "
-                f"{config.resample_interval_ms}"
+                f"{config.resample_interval_ms}, "
+                f"groups {artifact.groups} vs {group_specs}"
             )
 
     def wrapped_train_fn(samples: list[CalibrationSample]) -> None:
@@ -101,8 +110,9 @@ def build_pipeline(
         _check_artifact_matches_config(artifact)
         inference_engine_holder.set(InferenceEngine(artifact))
         # 새 모델은 오차 통계가 완전히 다르므로, 이전 모델 점수로 쌓인 연속 초과
-        # 카운터를 물려받아 첫 스텝부터 알람이 확정되는 일이 없도록 리셋한다.
-        debouncer.reset()
+        # 카운터를 물려받아 첫 스텝부터 알람이 확정되는 일이 없도록 모든 그룹을 리셋한다.
+        for debouncer in debouncers.values():
+            debouncer.reset()
 
     calibration_manager = CalibrationManager(
         buffer_writer=buffer_writer,
@@ -129,7 +139,7 @@ def build_pipeline(
         sliding_window=sliding_window,
         calibration_manager=calibration_manager,
         inference_engine_holder=inference_engine_holder,
-        debouncers={"all": debouncer},
+        debouncers=debouncers,
         result_publisher=result_publisher,
     )
 

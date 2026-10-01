@@ -89,6 +89,10 @@ class EquipmentConfig:
             return self.groups
         return (GroupConfig(name="all", state_tag=None, tags=self.tags),)
 
+    def group_specs(self) -> dict[str, tuple[str | None, tuple[str, ...]]]:
+        """그룹 이름 -> (상태 태그, 태그 목록). 학습 artifact에 저장되어 config와 비교된다."""
+        return {g.name: (g.state_tag, g.tags) for g in self.resolved_groups()}
+
 
 def _positive_int(value: object, label: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:

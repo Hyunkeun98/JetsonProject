@@ -37,6 +37,9 @@ def main() -> None:
             window_size=config.window_size,
             model_path=model_path,
             resample_interval_ms=config.resample_interval_ms,
+            groups=config.group_specs(),
+            epochs=config.training.epochs,
+            max_training_samples=config.training.max_samples,
         )
         pipeline = build_pipeline(
             config=config,

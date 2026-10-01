@@ -67,6 +67,7 @@ def _train_fn_for(config, model_dir):
         window_size=config.window_size,
         model_path=model_dir / f"{config.equipment_id}.pt",
         resample_interval_ms=config.resample_interval_ms,
+        groups=config.group_specs(),
         epochs=1,
         hidden_size=4,
         num_layers=1,
@@ -151,6 +152,7 @@ def test_pipeline_end_to_end_message_through_training(tmp_path):
             num_layers=1,
             state_dict=model.state_dict(),
             resample_interval_ms=config.resample_interval_ms,
+            groups=config.group_specs(),
         )
         save_artifact(model_dir / f"{config.equipment_id}.pt", artifact)
 
@@ -496,3 +498,170 @@ def test_pipeline_falls_back_to_calibrating_when_model_file_corrupted(tmp_path):
 
     assert pipeline.calibration_manager.state == CalibrationState.CALIBRATING
     assert pipeline.inference_engine_holder.get() is None
+
+
+# ---- 그룹 설정 ----
+
+from jetson_app.config import AlarmConfig, GroupConfig
+
+
+def _grouped_config(equipment_id, window_size=3, min_samples=10):
+    # _send는 첫 태그에 float(i), 나머지에 i % 2를 넣는다 -> s(상태 태그)는 0/1로 번갈아 변한다.
+    base = _e2e_config(equipment_id, tags=("a", "s", "b"), window_size=window_size, min_samples=min_samples)
+    return replace(
+        base,
+        groups=(
+            GroupConfig(name="proc", state_tag="s", tags=("a", "s")),
+            GroupConfig(name="general", state_tag=None, tags=("b",)),
+        ),
+    )
+
+
+def test_group_specs_helper_describes_resolved_groups():
+    flat = _e2e_config("flat", tags=("x", "y"))
+    grouped = _grouped_config("grouped")
+
+    assert flat.group_specs() == {"all": (None, ("x", "y"))}
+    assert grouped.group_specs() == {"proc": ("s", ("a", "s")), "general": (None, ("b",))}
+
+
+def test_pipeline_builds_one_debouncer_per_group_from_alarm_config(tmp_path):
+    config = replace(_grouped_config("e2e_deb"), alarm=AlarmConfig(threshold=9.5, confirm_steps=7))
+
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=tmp_path / "model_data",
+        train_fn=lambda samples: None,
+    )
+
+    debouncers = pipeline.snapshotter._debouncers
+    assert set(debouncers) == {"proc", "general"}
+    assert debouncers["proc"] is not debouncers["general"]
+    assert debouncers["proc"]._threshold == 9.5
+    assert debouncers["proc"]._confirm_ticks == 7
+
+
+def test_grouped_pipeline_resumes_monitoring_after_restart(tmp_path):
+    config = _grouped_config("e2e_grp_resume")
+    model_dir = tmp_path / "model_data"
+    train_fn = _train_fn_for(config, model_dir)
+
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    _feed_and_train(first, config.tags)
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+    assert load_artifact(model_dir / f"{config.equipment_id}.pt").groups == config.group_specs()
+
+    second = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+
+    assert second.calibration_manager.state == CalibrationState.MONITORING
+    assert second.inference_engine_holder.get() is not None
+
+
+def test_pipeline_falls_back_to_calibrating_when_group_layout_changed(tmp_path):
+    config = _grouped_config("e2e_grp_changed")
+    model_dir = tmp_path / "model_data"
+    train_fn = _train_fn_for(config, model_dir)
+
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    _feed_and_train(first, config.tags)
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+
+    renamed = replace(
+        config,
+        groups=(
+            GroupConfig(name="process_0", state_tag="s", tags=("a", "s")),
+            GroupConfig(name="general", state_tag=None, tags=("b",)),
+        ),
+    )
+    other_state = replace(
+        config,
+        groups=(
+            GroupConfig(name="proc", state_tag=None, tags=("a", "s")),
+            GroupConfig(name="general", state_tag=None, tags=("b",)),
+        ),
+    )
+    for changed in (renamed, other_state):
+        second = build_pipeline(
+            config=changed,
+            calibration_dir=tmp_path / "calibration_data",
+            model_dir=model_dir,
+            train_fn=train_fn,
+        )
+        assert second.calibration_manager.state == CalibrationState.CALIBRATING
+        assert second.inference_engine_holder.get() is None
+
+
+def test_grouped_pipeline_publishes_group_fields(tmp_path):
+    config = _grouped_config("e2e_grp_publish")
+    model_dir = tmp_path / "model_data"
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=_train_fn_for(config, model_dir),
+    )
+    _feed(pipeline, config.tags, 0, 20)
+    _send_train(pipeline)
+    assert pipeline.calibration_manager.state == CalibrationState.MONITORING
+
+    published = []
+
+    def _fake_publish(topic, payload):
+        published.append((topic, payload))
+        return SimpleNamespace(rc=0)
+
+    pipeline.mqtt_subscriber.client.publish = _fake_publish
+    _feed(pipeline, config.tags, 20, 30)
+
+    assert published, "MONITORING 진입 후에도 이상 점수가 발행되지 않았다"
+    record = json.loads(published[0][1])["records"][0]
+    assert record["jetson:top_deviant_tag"] in config.tags
+    for group in ("proc", "general"):
+        assert f"jetson:{group}:score" in record
+        assert isinstance(record[f"jetson:{group}:alarm"], bool)
+        assert record[f"jetson:{group}:top_tag"] in config.group_specs()[group][1]
+
+
+def test_flat_pipeline_publishes_the_original_three_fields(tmp_path):
+    config = _e2e_config("e2e_flat_publish")
+    model_dir = tmp_path / "model_data"
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=_train_fn_for(config, model_dir),
+    )
+    _feed(pipeline, config.tags, 0, 20)
+    _send_train(pipeline)
+    published = []
+
+    def _fake_publish(topic, payload):
+        published.append(payload)
+        return SimpleNamespace(rc=0)
+
+    pipeline.mqtt_subscriber.client.publish = _fake_publish
+    _feed(pipeline, config.tags, 20, 30)
+
+    record = json.loads(published[0])["records"][0]
+    assert set(record) == {
+        "timestamp",
+        "jetson:anomaly_score",
+        "jetson:alarm",
+        "jetson:top_deviant_tag",
+    }

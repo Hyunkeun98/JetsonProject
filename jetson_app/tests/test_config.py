@@ -339,3 +339,15 @@ def test_alarm_and_training_values_are_read(tmp_path):
 def test_invalid_alarm_or_training_values_are_rejected(tmp_path, extra, needle):
     with pytest.raises(ConfigError, match=needle):
         _load_text(tmp_path, SAMPLE_YAML + extra + "\n")
+
+
+def test_group_specs_maps_each_group_to_state_tag_and_tags(tmp_path):
+    grouped = _load_text(tmp_path, GROUPS_YAML)
+    flat = _load_text(tmp_path, SAMPLE_YAML)
+
+    assert grouped.group_specs() == {
+        "process_0": ("P:U0_ProcStart", ("P:U0_ProcStart", "A:AxX_Act_Pos")),
+        "process_4": ("P:U4_ProcStart", ("P:U4_ProcStart", "A:AxZ_Act_Pos", "T:U4_TaktTime")),
+        "general": (None, ("S:ConvSensor0",)),
+    }
+    assert flat.group_specs() == {"all": (None, flat.tags)}
