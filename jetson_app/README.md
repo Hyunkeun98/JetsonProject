@@ -192,6 +192,43 @@ mosquitto_pub -h localhost -t "jetson/test_dx1/cmd" -m '{"command": "recalibrate
 - DX1/PLC의 시계가 크게 앞서 가면(윈도우 길이보다 긴 공백) 슬라이딩 윈도우를 비우고 새 시점부터 다시 쌓는다. 반대로 시계가 뒤로 보정되어 이전 시각보다 크게 뒤처진 record가 10개 연속으로 오면, 점프한 시간만큼 데이터가 끊기지 않도록 새 시각을 기준으로 재동기화한다(한두 개의 잘못된 타임스탬프는 그냥 폐기한다).
 - 캘리브레이션 버퍼의 오래된 데이터 정리(`calibration.max_duration`)는 Jetson 시계가 아니라 DX1 이벤트 시각을 기준으로 하므로, 두 시계가 달라도 버퍼가 지워지지 않는다.
 
+### 그룹과 상태별 기준 (공정별 점수)
+
+config에서 `tags:` 대신 `groups:`를 쓰면 태그를 그룹으로 묶을 수 있다(둘을 함께 쓸 수는 없다). 그룹마다 이상 점수와 알람이 따로 계산되므로 어느 부분의 이상인지 바로 알 수 있다.
+
+```yaml
+groups:
+  process_4:
+    state_tag: "NX5_ProcStart:U4_ProcStart"   # 선택: 이 그룹의 동작 중 신호(0/1)
+    tags: ["NX5_ProcStart:U4_ProcStart", "NX5_AxisData:AxZ_Act_Trq", "NX5_TaktTime:U4_TaktTime"]
+  general:                                       # 상태 태그가 없는 그룹
+    tags: ["NX5_SenData:ConvSensor0"]
+alarm: {threshold: 3.0, confirm_steps: 3}        # 선택(기본값)
+training: {max_samples: 60000, epochs: 20}       # 선택(기본 20000 / 20)
+```
+
+- `state_tag`가 있으면 그 그룹의 태그는 **동작 중 / 대기 중 상태별로 따로 학습한 정상 오차 기준**으로 판정한다. 그래서 공정이 쉬는 동안 서보에 생기는 작은 충격도 대기 상태의 잔잔한 기준과 비교되어 이상으로 드러난다. 한 태그는 하나의 그룹에만 속하고, `state_tag`는 그 그룹의 `tags`에 포함돼야 한다.
+- **정상 데이터에 동작 중과 대기 중이 모두 충분히 들어 있어야 한다**(각 상태 100스텝 이상). 부족한 상태는 전체 기준으로 대체되고 학습 로그에 `[train] 상태별 기준 표본 부족 -> 전체 기준으로 대체: …`가 출력된다.
+- 발행 결과(`publish_topic`)에는 기존 필드(`jetson:anomaly_score`, `jetson:alarm`, `jetson:top_deviant_tag`)와 함께, 그룹이 둘 이상이면 그룹마다 `jetson:<그룹>:score`, `jetson:<그룹>:alarm`, `jetson:<그룹>:top_tag`가 들어간다. 전체 점수는 그룹 점수의 최댓값, 전체 알람은 그룹 알람 중 하나라도 참일 때다. 그룹 알람은 그룹마다 독립적으로 `alarm.confirm_steps`번 연속 `alarm.threshold`를 넘어야 확정된다.
+- 학습 후 **그룹 구성(이름, 상태 태그, 태그)을 바꾸면** 저장된 모델과 맞지 않아 재시작 시 `CALIBRATING`으로 폴백한다. 이때는 `recalibrate`로 버퍼를 비우고 다시 학습한다.
+- `training.max_samples`는 학습에 쓰는 가장 최근 스텝 수의 상한이다. 90분(100ms 격자 약 54,000스텝)을 모두 쓰려면 이 값을 올린다. 학습 시간과 메모리도 함께 늘어난다.
+
+### 새 설비를 붙이는 순서
+
+1. **받을 데이터를 엑셀에 적는다.** 열은 `Variables`, `MQTT Topic`(필수)과 `Description`, `Tag`, `Group`, `StateTag`(선택)이다. `Tag`는 DX1이 내보내는 정확한 태그 이름이고, 없으면 `<접두사>_<토픽 마지막 마디>:<변수명의 '.'를 '_'로>`로 만든다. `Group`이 비어 있으면 `general`, `StateTag`에 `Y`를 적으면 그 행이 그룹의 상태 태그다. `Group` 열이 없으면 `--group-regex`로 `Description`에서 그룹을 찾을 수 있다.
+2. **설정 초안을 만든다**(개발 PC에서, 엑셀을 읽으려면 `uv sync --extra tools`가 필요하다):
+
+   ```bash
+   uv run jetson-datalist DataList.xlsx --equipment-id nx5 --collector-prefix NX5 \
+     --group-regex '공정(\d+)' --group-template 'process_{}' --state-pattern 'U{}_ProcStart' \
+     --samples ../JSONData --output configs/nx5.yaml
+   ```
+
+   - **태그는 엑셀에 적은 것만 사용한다.** 도구가 태그를 찾아 넣거나 빼지 않는다.
+   - `--samples`(샘플 JSON 파일/폴더)를 주면 목록의 태그가 샘플에 실제로 있는지 확인하고(없으면 오류, `--allow-missing`이면 경고), 샘플 간격으로 `resample_interval_ms`를 권장해 기본값으로 넣고, 값이 변하지 않은 태그를 경고한다. 샘플에만 있는 태그는 참고로 출력만 한다.
+3. **생성된 YAML을 확인하고 필요하면 고친다**(`resample_interval_ms`, `window_size`, `max_lateness_ms`, `alarm`, `training`).
+4. 앱을 실행하고(`CALIBRATING`), 정상 가동 데이터가 충분히 쌓이면 `train` 명령을 보내 `MONITORING`으로 전환한다. 정상 데이터는 그 장비의 실제 운영 방식(동작/대기 상태 포함)을 대표해야 한다.
+
 ### 문제 발생 시 점검 순서
 
 1. **Jetson 쪽**: `mosquitto_sub -h localhost -t "dx1/test_dx1/telemetry" -v`로 브로커에 메시지가 도달하는지 먼저 확인한다.

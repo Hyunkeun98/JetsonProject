@@ -1,6 +1,6 @@
 # 그룹별 점수와 동작/대기 상태별 기준 설계
 
-- Status: Approved (design, 2026-10-01 대화에서 승인), 구현 계획 작성 전
+- Status: Implemented (2026-10-01), 구현 계획: [`../plans/2026-10-01-group-scoring.md`](../plans/2026-10-01-group-scoring.md)
 - Date: 2026-10-01
 - 관련 문서: [`2026-10-01-event-time-resampler-design.md`](2026-10-01-event-time-resampler-design.md) (구현 완료), [`2026-08-04-jetson-anomaly-inference-pipeline-design.md`](2026-08-04-jetson-anomaly-inference-pipeline-design.md), [`2026-07-31-jetson-dx1-anomaly-framework-design.md`](2026-07-31-jetson-dx1-anomaly-framework-design.md)
 
@@ -169,3 +169,11 @@ training: {max_samples: 60000, epochs: 20}     # 선택, 기본 max_samples 2000
 ## 영향 받는 파일
 
 `config.py`(스키마), `training.py`(상태별 통계, artifact, 설정 가능한 학습 상한/에폭), `inference.py`(그룹 점수), `debounce.py`(변경 없음, 그룹별 인스턴스 사용), `snapshot_processor.py`(그룹별 디바운서와 발행), `publisher.py`(스키마 확장), `pipeline.py`(연결과 호환성 검사), `subscriber_cli.py`(학습 설정 전달), 신규 `tools/datalist_to_config.py`, `pyproject.toml`(dev 의존성), `README.md`, 대응 테스트 파일.
+
+## 구현 노트
+
+- 그룹 점수는 그룹 안의 모든 태그의 z-score 최댓값이며, **상태 태그 자신도 포함**한다(상태 태그는 전체 통계로 판정된다).
+- 실행 중 `state_tag` 값이 `None`인 경우는 점수 계산 앞단에서 이미 그 스텝이 건너뛰어지므로(윈도우/실제값에 `None`이 있으면 채점하지 않는 기존 규칙) 실제로 도달하지 않는다. `InferenceEngine._stats_for`는 방어적으로 전체 통계를 쓰도록 구현되어 있다.
+- 처리기는 결과에 그룹 정보가 없으면(예: 테스트용 가짜 엔진) 전체 점수를 단일 그룹 `all`로 보고 `debouncers["all"]`을 쓴다.
+- 설정 생성 도구는 `jetson_app/datalist_to_config.py`(진입점 `jetson-datalist`)이며 `openpyxl`은 `tools` 선택 의존성과 dev 그룹에만 있다. 실제 `DataList.xlsx`와 `JSONData` 샘플로 `configs/nx5.yaml`(그룹 12개, 태그 46개, 격자 100ms 권장)을 생성했다.
+- **미해결(추후 튜닝):** 대기 중 서보 노이즈가 매우 작으면 사소한 변동에도 점수가 크게 나올 수 있다. 실제 가동 데이터로 `alarm.threshold`와 표준편차 하한(`_floor_std`)을 튜닝한다.
