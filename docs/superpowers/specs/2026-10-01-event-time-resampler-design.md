@@ -1,6 +1,6 @@
 # 이벤트 시간 기반 리샘플러 설계
 
-- Status: Approved (design, 2026-10-01 대화에서 승인), 구현 계획 작성 전
+- Status: Implemented (2026-10-01), 구현 계획: [`../plans/2026-10-01-event-time-resampler.md`](../plans/2026-10-01-event-time-resampler.md)
 - Date: 2026-10-01
 - 관련 문서: [`2026-08-04-jetson-anomaly-inference-pipeline-design.md`](2026-08-04-jetson-anomaly-inference-pipeline-design.md) (Tag Buffer / 스냅샷 스케줄러 / 캘리브레이션 / 추론)
 
@@ -89,3 +89,10 @@ DX1(SpeeDBee Synapse)은 Collector 주기(현재 100ms, 앞으로 더 짧아질 
 ## 7. 영향 받는 파일
 
 `mqtt_subscriber.py`(Record, 파서), `buffer.py`(리샘플러), `scheduler.py`(큐 소비자), `config.py`, `training.py`(artifact 필드), `pipeline.py`(연결과 호환성 검사), `README.md`, `configs/test_dx1.example.yaml`, 신규 `timeparse.py`, 그리고 대응 테스트 파일.
+
+## 구현 노트
+
+- 스펙의 `buffer.py`/`scheduler.py` 수정 대신 `resampler.py`(`EventTimeResampler`, `ResampledStep`)와 `snapshot_processor.py`(`SnapshotProcessor`)를 새로 만들고, 기존 `TagBuffer`와 `scheduler.py`는 제거했다. 동작은 스펙과 같다.
+- 처리 스레드는 큐를 `get(timeout=0.1)`로 소비하고, `stop()`은 스레드를 join한 뒤 남은 큐를 호출 스레드에서 마저 처리한다. 테스트는 `process_pending()`으로 스레드 없이 결정적으로 검증한다.
+- 격자 정보가 없는 기존 artifact는 `resample_interval_ms = 0`으로 읽혀 항상 불일치로 처리된다(재학습 유도).
+- **미해결(추후 보강):** record 값의 타입 검증(문자열/`null`/`true` 등 비숫자 값)은 아직 하지 않는다. 실제 토픽 샘플을 확보한 뒤 보강한다.

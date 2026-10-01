@@ -1,10 +1,10 @@
 # jetson_app
 
-Jetson 쪽 실시간 이상탐지 프레임워크의 통신 + 데이터 파이프라인 레이어. DX1(SpeeDBee Synapse)이 MQTT로 Publish하는 설비 태그 데이터를 여러 토픽에서 구독해 Tag Buffer에 모으고, 주기적으로 스냅샷을 떠서 슬라이딩 윈도우와 캘리브레이션 버퍼에 쌓는다. MQTT 명령으로 학습(train)/재캘리브레이션(recalibrate) 상태 전이를 제어한다.
+Jetson 쪽 실시간 이상탐지 프레임워크의 통신 + 데이터 파이프라인 레이어. DX1(SpeeDBee Synapse)이 MQTT로 Publish하는 설비 태그 데이터를 여러 토픽에서 구독해 각 record의 `timestamp`(이벤트 시각)를 기준으로 `resample_interval_ms` 격자에 배치(이벤트 시간 리샘플러)하고, 확정된 칸을 슬라이딩 윈도우와 캘리브레이션 버퍼에 쌓는다. MQTT 명령으로 학습(train)/재캘리브레이션(recalibrate) 상태 전이를 제어한다.
 
 전체 설계 배경은 [`../docs/superpowers/specs/2026-07-31-jetson-dx1-anomaly-framework-design.md`](../docs/superpowers/specs/2026-07-31-jetson-dx1-anomaly-framework-design.md), 이 통신 레이어의 구현 계획은 [`../docs/superpowers/plans/2026-08-03-jetson-mqtt-communication-layer.md`](../docs/superpowers/plans/2026-08-03-jetson-mqtt-communication-layer.md) 참고.
 
-현재 범위: 설비 config 로더(다중 토픽) + MQTT 파싱/구독자 + Tag Buffer/슬라이딩 윈도우 + 주기 스냅샷 스케줄러 + 캘리브레이션 저장/상태머신 + MQTT train/recalibrate 명령 구독자 + 설비 통합 PyTorch GRU 모델 학습(태그 타입별 손실, 정규화/오차 통계 저장/로드) + CLI 진입점(코드, 유닛테스트 완료). 실시간 이상 점수 계산/디바운스/Result Publisher는 이후 별도 계획.
+현재 범위: 설비 config 로더(다중 토픽) + MQTT 파싱/구독자 + 이벤트 시간 리샘플러/슬라이딩 윈도우 + 스냅샷 처리 스레드 + 캘리브레이션 저장/상태머신 + MQTT train/recalibrate 명령 구독자 + 설비 통합 PyTorch GRU 모델 학습(태그 타입별 손실, 정규화/오차 통계 저장/로드) + 실시간 이상 점수 계산/디바운스/Result Publisher + CLI 진입점(코드, 유닛테스트 완료).
 
 ## 필요 환경
 
@@ -153,13 +153,13 @@ uv run jetson-app --config configs/test_dx1.yaml --host localhost
 
 (또는 동일하게 `uv run python -m jetson_app.subscriber_cli --config configs/test_dx1.yaml --host localhost`)
 
-시작 시 `[test_dx1] 1개 토픽 구독 시작 (localhost:1883), 캘리브레이션 데이터: calibration_data, 모델 저장 위치: model_data` 형태의 구독 확인 줄이 출력된다. 이후에는 메시지마다 출력되지 않고, 데이터가 실제로 흐르고 있으면 약 5초에 한 번씩 다음과 같은 하트비트 줄이 찍힌다:
+시작 시 `[test_dx1] 1개 토픽 구독 시작 (localhost:1883), 캘리브레이션 데이터: calibration_data, 모델 저장 위치: model_data` 형태의 구독 확인 줄이 출력된다. 이후에는 메시지마다 출력되지 않고, 데이터가 실제로 흐르고 있으면 스냅샷 100개마다(격자가 50ms면 약 5초에 한 번) 다음과 같은 하트비트 줄이 찍힌다:
 
 ```
 [snapshotter] 100번째 스냅샷 처리, 윈도우 10/10, 캘리브레이션 상태=CALIBRATING
 ```
 
-즉 **하트비트 줄이 주기적으로 보이면 정상 동작 중**이고, 구독 확인 줄만 나오고 하트비트가 전혀 안 나오면 아직 태그 값이 하나도 안 들어온 것이다(아래 점검 순서 참고). `Ctrl+C`로 종료할 수 있다.
+즉 **하트비트 줄이 주기적으로 보이면 정상 동작 중**이고, 구독 확인 줄만 나오고 하트비트가 전혀 안 나오면 아직 태그 값이 하나도 안 들어온 것이다(또는 `max_lateness_ms`만큼 기다리는 중이다)(아래 점검 순서 참고). `Ctrl+C`로 종료할 수 있다.
 
 ### 캘리브레이션 데이터 위치와 train/recalibrate 명령
 
@@ -182,6 +182,14 @@ mosquitto_pub -h localhost -t "jetson/test_dx1/cmd" -m '{"command": "recalibrate
   즉 학습 중 콘솔이 조용하고 잠깐 연결이 끊겼다 붙는 것은 **현재 구조상 정상 동작**이다. 학습을 네트워크 스레드 밖(별도 워커 스레드/프로세스)으로 빼는 것은 다음 계획의 범위다.
 
 > 주의: 이 명령들에는 절대 `-r`(retain)을 붙이지 않는다. retain된 명령 메시지는 앱이 재접속할 때마다 다시 전달되어 의도치 않게 재실행된다.
+
+### 취득 주기와 `resample_interval_ms`, `max_lateness_ms`
+
+- DX1은 Collector 주기(예: 100ms)로 취득한 값을 여러 개 묶어 한 MQTT 메시지로 보낼 수 있다. Jetson은 도착 시각이 아니라 **각 record의 `timestamp`** 로 값을 배치하므로, 메시지에 record가 몇 개 들어 있든 시점이 보존된다.
+- `resample_interval_ms`는 모델이 보는 시간 간격이다. **DX1 취득 주기에 맞춰 config에 직접 적는다**(예: 취득이 100ms면 `100`, 더 줄이면 같이 줄인다). 격자보다 빠른 신호는 한 칸 안의 마지막 값을, 느린 신호는 직전 값을 유지(ffill)한다.
+- `max_lateness_ms`(기본 2000)는 토픽 간 도착 시차를 기다리는 시간이다. **토픽 중 가장 긴 배치 간격보다 크게** 잡는다. 너무 작으면 늦게 도착한 record가 `[resampler: …] 누적 N건` 로그와 함께 폐기되고, 클수록 결과 발행이 그만큼 늦어진다.
+- 학습 모델에 격자 값이 함께 저장된다. **`resample_interval_ms`를 바꾸면** 저장된 모델과 호환되지 않아 재시작 시 `CALIBRATING`으로 폴백한다. 캘리브레이션 버퍼도 이전 간격의 데이터와 섞이므로, 격자를 바꿀 때는 반드시 `recalibrate` 명령을 보내 버퍼를 비우고 다시 시작한다.
+- DX1/PLC의 시계가 크게 앞서 가면(윈도우 길이보다 긴 공백) 슬라이딩 윈도우를 비우고 새 시점부터 다시 쌓는다.
 
 ### 문제 발생 시 점검 순서
 
