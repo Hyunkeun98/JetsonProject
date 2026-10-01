@@ -67,6 +67,7 @@ def test_build_pipeline_on_record_updates_tag_buffer(tmp_path):
         Record(
             timestamp="2026-08-04T00:00:00+00:00",
             values={"PLC_Collector_Actuator_1:AirBlower.Cmd[0]": 1},
+            epoch_ns=0,
         )
     )
 

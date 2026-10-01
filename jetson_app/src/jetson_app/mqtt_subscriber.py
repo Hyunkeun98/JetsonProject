@@ -7,15 +7,22 @@ from typing import Callable
 import paho.mqtt.client as mqtt
 
 from .config import EquipmentConfig
+from .droplog import DropCounter
+from .timeparse import parse_dx1_timestamp
 
 
 @dataclass(frozen=True)
 class Record:
     timestamp: str
     values: dict[str, float]
+    epoch_ns: int
 
 
-def parse_and_filter_records(payload: bytes, tags: tuple[str, ...]) -> list[Record]:
+def parse_and_filter_records(
+    payload: bytes,
+    tags: tuple[str, ...],
+    on_invalid_timestamp: Callable[[], None] | None = None,
+) -> list[Record]:
     tag_set = set(tags)
     try:
         data = json.loads(payload)
@@ -38,8 +45,14 @@ def parse_and_filter_records(payload: bytes, tags: tuple[str, ...]) -> list[Reco
             continue
         timestamp = raw.get("timestamp")
         values = {k: v for k, v in raw.items() if k in tag_set}
-        if timestamp is not None and values:
-            result.append(Record(timestamp=timestamp, values=values))
+        if timestamp is None or not values:
+            continue
+        epoch_ns = parse_dx1_timestamp(timestamp)
+        if epoch_ns is None:
+            if on_invalid_timestamp is not None:
+                on_invalid_timestamp()
+            continue
+        result.append(Record(timestamp=timestamp, values=values, epoch_ns=epoch_ns))
     return result
 
 
@@ -51,6 +64,9 @@ class MqttRecordSubscriber:
     ) -> None:
         self._config = config
         self._on_record = on_record
+        self._invalid_timestamps = DropCounter(
+            f"{config.equipment_id}: timestamp를 해석할 수 없어 폐기한 record"
+        )
         self._client = mqtt.Client()
         self._client.on_connect = self._handle_connect
         self._client.on_message = self._handle_message
@@ -77,5 +93,7 @@ class MqttRecordSubscriber:
         client.subscribe(self._config.command_topic)
 
     def _handle_message(self, client, userdata, msg):
-        for record in parse_and_filter_records(msg.payload, self._config.tags):
+        for record in parse_and_filter_records(
+            msg.payload, self._config.tags, on_invalid_timestamp=self._invalid_timestamps.add
+        ):
             self._on_record(record)

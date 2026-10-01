@@ -4,6 +4,10 @@ from unittest.mock import MagicMock
 
 from jetson_app.config import CalibrationConfig, EquipmentConfig
 from jetson_app.mqtt_subscriber import MqttRecordSubscriber, Record, parse_and_filter_records
+from jetson_app.timeparse import parse_dx1_timestamp
+
+
+_EPOCH_2026_08_03_NS = parse_dx1_timestamp("2026-08-03T00:00:00Z")
 
 
 def _make_config(subscribe_topics, command_topic="jetson/x/cmd"):
@@ -39,6 +43,7 @@ def test_parse_and_filter_records_keeps_only_configured_tags():
         Record(
             timestamp="2026-08-03T00:00:00Z",
             values={"servo1:torque": 12.3, "sensor:A_L_01": 110.2},
+            epoch_ns=_EPOCH_2026_08_03_NS,
         )
     ]
 
@@ -54,14 +59,14 @@ def test_parse_and_filter_records_skips_record_with_no_matching_tags():
 def test_parse_and_filter_records_handles_multiple_records():
     payload = (
         b'{"records": ['
-        b'{"timestamp": "t1", "servo1:torque": 1.0}, '
-        b'{"timestamp": "t2", "servo1:torque": 2.0}'
+        b'{"timestamp": "2026-08-03T00:00:01Z", "servo1:torque": 1.0}, '
+        b'{"timestamp": "2026-08-03T00:00:02Z", "servo1:torque": 2.0}'
         b']}'
     )
 
     records = parse_and_filter_records(payload, tags=("servo1:torque",))
 
-    assert [r.timestamp for r in records] == ["t1", "t2"]
+    assert [r.timestamp for r in records] == ["2026-08-03T00:00:01Z", "2026-08-03T00:00:02Z"]
 
 
 def test_parse_and_filter_records_handles_malformed_json():
@@ -81,11 +86,20 @@ def test_parse_and_filter_records_handles_records_not_a_list():
 
 
 def test_parse_and_filter_records_skips_non_dict_items_in_records():
-    payload = b'{"records": ["not a dict", {"timestamp": "t1", "servo1:torque": 1.0}]}'
+    payload = (
+        b'{"records": ["not a dict", '
+        b'{"timestamp": "2026-08-03T00:00:00Z", "servo1:torque": 1.0}]}'
+    )
 
     records = parse_and_filter_records(payload, tags=("servo1:torque",))
 
-    assert records == [Record(timestamp="t1", values={"servo1:torque": 1.0})]
+    assert records == [
+        Record(
+            timestamp="2026-08-03T00:00:00Z",
+            values={"servo1:torque": 1.0},
+            epoch_ns=_EPOCH_2026_08_03_NS,
+        )
+    ]
 
 
 def test_parse_and_filter_records_handles_non_object_top_level_json():
@@ -137,7 +151,7 @@ def test_handle_message_delivers_parsed_records_to_on_record():
     subscriber._handle_message(fake_client, None, msg)
 
     assert received == [
-        Record(timestamp="2026-08-03T00:00:00Z", values={"a": 12.3})
+        Record(timestamp="2026-08-03T00:00:00Z", values={"a": 12.3}, epoch_ns=_EPOCH_2026_08_03_NS)
     ]
 
 
@@ -157,3 +171,42 @@ def test_client_property_exposes_underlying_paho_client():
     subscriber = MqttRecordSubscriber(config, on_record=lambda r: None)
 
     assert subscriber.client is subscriber._client
+
+
+def test_parse_and_filter_records_extracts_event_time_from_dx1_timestamp():
+    payload = (
+        b'{"records": [{"timestamp": "2026-10-01T00:47:01.718651520+0000", '
+        b'"NX5_Axis_X_Data:AxX_Act_Pos": 123.4}]}'
+    )
+
+    records = parse_and_filter_records(payload, tags=("NX5_Axis_X_Data:AxX_Act_Pos",))
+
+    assert [r.epoch_ns for r in records] == [parse_dx1_timestamp("2026-10-01T00:47:01.718651520+0000")]
+
+
+def test_parse_and_filter_records_drops_records_with_unparseable_timestamp_and_reports_them():
+    payload = (
+        b'{"records": ['
+        b'{"timestamp": "not-a-time", "a": 1.0}, '
+        b'{"timestamp": "2026-08-03T00:00:00Z", "a": 2.0}]}'
+    )
+    dropped = []
+
+    records = parse_and_filter_records(payload, tags=("a",), on_invalid_timestamp=lambda: dropped.append(1))
+
+    assert [r.values for r in records] == [{"a": 2.0}]
+    assert dropped == [1]
+
+
+def test_parse_and_filter_records_keeps_every_record_of_a_batch_message():
+    batch = ", ".join(
+        '{"timestamp": "2026-10-01T00:47:0%d.%d00000000+0000", "a": %d}' % (s, d, s * 10 + d)
+        for s in (1, 2)
+        for d in range(5)
+    )
+    payload = ('{"records": [%s]}' % batch).encode("utf-8")
+
+    records = parse_and_filter_records(payload, tags=("a",))
+
+    assert [r.values["a"] for r in records] == [10, 11, 12, 13, 14, 20, 21, 22, 23, 24]
+    assert [r.epoch_ns for r in records] == sorted(r.epoch_ns for r in records)
