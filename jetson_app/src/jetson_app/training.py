@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
@@ -16,6 +16,9 @@ DEFAULT_HIDDEN_SIZE = 64
 DEFAULT_NUM_LAYERS = 2
 DEFAULT_LEARNING_RATE = 1e-3
 DEFAULT_BATCH_SIZE = 64
+# 동작(ON)/대기(OFF) 상태별 정상 오차 통계를 믿으려면 최소한 이만큼의 표본이 필요하다
+# (100ms 격자에서 약 10초). 모자라면 그 상태는 전체 통계로 대체한다.
+MIN_REGIME_SAMPLES = 100
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,10 @@ class ModelArtifact:
     # 학습 때의 리샘플 격자 간격(ms). 0은 격자 정보가 없는 기존 artifact를 뜻하며,
     # pipeline의 호환성 검사에서 항상 불일치로 처리되어 재학습을 유도한다.
     resample_interval_ms: int = 0
+    # 그룹 이름 -> (상태 태그 또는 None, 태그 목록). 학습 때의 그룹 구성이며 config와 다르면 폴백한다.
+    groups: dict = field(default_factory=dict)
+    # 태그 -> {"on"/"off": (평균, 표준편차, 표본 수)}. 상태 태그가 있는 그룹의 태그만 갖는다.
+    regime_error_stats: dict = field(default_factory=dict)
 
 
 def train_model(
@@ -44,7 +51,9 @@ def train_model(
     learning_rate: float = DEFAULT_LEARNING_RATE,
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_training_samples: int = DEFAULT_MAX_TRAINING_SAMPLES,
+    groups: dict | None = None,
 ) -> ModelArtifact:
+    groups = groups or {}
     if len(samples) > max_training_samples:
         samples = samples[-max_training_samples:]
 
@@ -69,6 +78,10 @@ def train_model(
             f"not enough calibration samples to build any training window "
             f"(have {len(samples)} samples, need > {window_size})"
         )
+
+    # 상태(동작/대기) 판정은 정규화 전 원본 값으로 해야 하므로, 정규화(in-place)보다 먼저 떼어 둔다.
+    state_tags = {state_tag for state_tag, _ in groups.values() if state_tag is not None}
+    state_values = {st: y[:, tags.index(st)].clone() for st in state_tags}
 
     norm_stats_tuples = {t: (s.mean, s.std) for t, s in norm_stats.items()}
     normalize_continuous_columns(X, y, tags, continuous_indices, norm_stats_tuples)
@@ -105,9 +118,13 @@ def train_model(
             loss.backward()
             optimizer.step()
 
-    error_stats = _compute_error_stats(
-        model, X, y, tags, continuous_indices, binary_indices, batch_size
-    )
+    errors = compute_raw_errors(model, X, y, tags, continuous_indices, binary_indices, batch_size)
+    error_stats = _error_stats_from(errors)
+    regime_error_stats, fallbacks = compute_regime_error_stats(errors, state_values, groups)
+    if fallbacks:
+        shown = ", ".join(fallbacks[:10])
+        more = f" 외 {len(fallbacks) - 10}건" if len(fallbacks) > 10 else ""
+        print(f"[train] 상태별 기준 표본 부족 -> 전체 기준으로 대체: {shown}{more}")
 
     return ModelArtifact(
         tags=tags,
@@ -119,6 +136,8 @@ def train_model(
         num_layers=num_layers,
         state_dict=model.state_dict(),
         resample_interval_ms=resample_interval_ms,
+        groups=groups,
+        regime_error_stats=regime_error_stats,
     )
 
 
@@ -195,17 +214,51 @@ def _compute_error_stats(
     """학습 완료 후 캘리브레이션 데이터 전체에 대한 태그별 "정상 오차" 평균/표준편차.
     실시간 이상 점수 계산(inference.py)에서 원본 오차를 재정규화하는 기준으로 쓰인다."""
     errors = compute_raw_errors(model, X, y, tags, continuous_indices, binary_indices, batch_size)
+    return _error_stats_from(errors)
 
-    result: dict[str, tuple[float, float]] = {}
-    for tag, err in errors.items():
-        mean = err.mean().item()
-        if err.numel() > 1:
-            variance = ((err - err.mean()) ** 2).mean().item()
-            std = variance ** 0.5
-        else:
-            std = 0.0
-        result[tag] = (mean, _floor_std(mean, std))
-    return result
+
+def _mean_and_floored_std(err: torch.Tensor) -> tuple[float, float]:
+    mean = err.mean().item()
+    if err.numel() > 1:
+        variance = ((err - err.mean()) ** 2).mean().item()
+        std = variance ** 0.5
+    else:
+        std = 0.0
+    return mean, _floor_std(mean, std)
+
+
+def _error_stats_from(errors: dict[str, torch.Tensor]) -> dict[str, tuple[float, float]]:
+    return {tag: _mean_and_floored_std(err) for tag, err in errors.items()}
+
+
+def compute_regime_error_stats(
+    errors: dict[str, torch.Tensor],
+    state_values: dict[str, torch.Tensor],
+    groups: dict,
+    min_samples: int = MIN_REGIME_SAMPLES,
+) -> tuple[dict[str, dict[str, tuple[float, float, int]]], list[str]]:
+    """상태 태그가 있는 그룹의 태그마다 정상 오차 통계를 동작("on")/대기("off")로 나눠 구한다.
+    상태는 state_values[상태 태그](정규화 전 원본 값) >= 0.5 이면 ON. 표본이 min_samples
+    미만인 상태는 결과에서 빼고(실시간에서 전체 통계로 대체됨) "태그(상태:표본수)" 목록으로
+    돌려준다. 상태 태그 자신과 상태 태그가 없는 그룹의 태그는 다루지 않는다."""
+    stats: dict[str, dict[str, tuple[float, float, int]]] = {}
+    fallbacks: list[str] = []
+    for state_tag, tags in groups.values():
+        if state_tag is None:
+            continue
+        on_mask = state_values[state_tag] >= 0.5
+        for tag in tags:
+            if tag == state_tag or tag not in errors:
+                continue
+            for regime, mask in (("on", on_mask), ("off", ~on_mask)):
+                selected = errors[tag][mask]
+                n = int(selected.numel())
+                if n < min_samples:
+                    fallbacks.append(f"{tag}({regime}:{n})")
+                    continue
+                mean, std = _mean_and_floored_std(selected)
+                stats.setdefault(tag, {})[regime] = (mean, std, n)
+    return stats, fallbacks
 
 
 def save_artifact(path: str | Path, artifact: ModelArtifact) -> None:
@@ -222,6 +275,8 @@ def save_artifact(path: str | Path, artifact: ModelArtifact) -> None:
             "num_layers": artifact.num_layers,
             "state_dict": artifact.state_dict,
             "resample_interval_ms": artifact.resample_interval_ms,
+            "groups": artifact.groups,
+            "regime_error_stats": artifact.regime_error_stats,
         },
         path,
     )
@@ -239,6 +294,8 @@ def load_artifact(path: str | Path) -> ModelArtifact:
         num_layers=data["num_layers"],
         state_dict=data["state_dict"],
         resample_interval_ms=data.get("resample_interval_ms", 0),
+        groups=data.get("groups", {}),
+        regime_error_stats=data.get("regime_error_stats", {}),
     )
 
 
@@ -247,6 +304,7 @@ def make_train_fn(
     window_size: int,
     model_path: str | Path,
     resample_interval_ms: int,
+    groups: dict | None = None,
     epochs: int = DEFAULT_EPOCHS,
     hidden_size: int = DEFAULT_HIDDEN_SIZE,
     num_layers: int = DEFAULT_NUM_LAYERS,
@@ -260,6 +318,7 @@ def make_train_fn(
             tags=tags,
             window_size=window_size,
             resample_interval_ms=resample_interval_ms,
+            groups=groups,
             epochs=epochs,
             hidden_size=hidden_size,
             num_layers=num_layers,

@@ -240,3 +240,179 @@ def test_model_artifact_path_builds_expected_path():
 def test_state_marker_path_builds_expected_path():
     path = state_marker_path("model_data", "line_A")
     assert path == Path("model_data") / "line_A.state"
+
+
+# ---- 그룹/상태별 정상 오차 기준 ----
+
+from jetson_app.training import MIN_REGIME_SAMPLES, compute_regime_error_stats
+
+
+def _state_samples(n, state_for, a_for=lambda i: float(i % 7)):
+    return [
+        CalibrationSample(
+            timestamp=f"t{i}",
+            values={"s": state_for(i), "a": a_for(i), "b": float(i)},
+        )
+        for i in range(n)
+    ]
+
+
+def test_regime_stats_split_errors_by_state_value():
+    errors = {"a": torch.tensor([0.1] * 150 + [1.0] * 150)}
+    state_values = {"s": torch.tensor([0.0] * 150 + [1.0] * 150)}
+    groups = {"g": ("s", ("s", "a"))}
+
+    stats, fallbacks = compute_regime_error_stats(errors, state_values, groups)
+
+    assert stats["a"]["off"][0] == pytest.approx(0.1)
+    assert stats["a"]["on"][0] == pytest.approx(1.0)
+    assert stats["a"]["off"][2] == 150 and stats["a"]["on"][2] == 150
+    # 표준편차 하한(_floor_std)은 상태별 평균 기준으로 적용된다
+    assert stats["a"]["off"][1] == pytest.approx(0.005)
+    assert stats["a"]["on"][1] == pytest.approx(0.05)
+    assert "s" not in stats  # 상태 태그 자신은 전체 통계를 쓴다
+    assert fallbacks == []
+
+
+def test_regime_stats_treat_half_as_on():
+    errors = {"a": torch.tensor([0.2] * MIN_REGIME_SAMPLES + [0.9] * MIN_REGIME_SAMPLES)}
+    state_values = {"s": torch.tensor([0.49] * MIN_REGIME_SAMPLES + [0.5] * MIN_REGIME_SAMPLES)}
+
+    stats, _ = compute_regime_error_stats(errors, state_values, {"g": ("s", ("s", "a"))})
+
+    assert stats["a"]["off"][0] == pytest.approx(0.2)
+    assert stats["a"]["on"][0] == pytest.approx(0.9)
+
+
+def test_regime_stats_drop_states_with_too_few_samples_and_report_them():
+    errors = {"a": torch.tensor([0.1] * 200 + [1.0] * 5)}
+    state_values = {"s": torch.tensor([0.0] * 200 + [1.0] * 5)}
+
+    stats, fallbacks = compute_regime_error_stats(errors, state_values, {"g": ("s", ("s", "a"))})
+
+    assert "on" not in stats["a"]
+    assert "off" in stats["a"]
+    assert fallbacks == ["a(on:5)"]
+
+
+def test_regime_stats_ignore_groups_without_a_state_tag():
+    errors = {"a": torch.tensor([0.1] * 300)}
+
+    stats, fallbacks = compute_regime_error_stats(errors, {}, {"general": (None, ("a",))})
+
+    assert stats == {} and fallbacks == []
+
+
+def test_train_model_fills_groups_and_regime_stats():
+    groups = {"proc": ("s", ("s", "a")), "general": (None, ("b",))}
+    samples = _state_samples(400, state_for=lambda i: float((i // 10) % 2))
+
+    artifact = train_model(
+        samples,
+        tags=("s", "a", "b"),
+        window_size=3,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+        groups=groups,
+    )
+
+    assert artifact.groups == groups
+    assert set(artifact.regime_error_stats) == {"a"}  # s는 상태 태그, b는 상태 없는 그룹
+    on_n = artifact.regime_error_stats["a"]["on"][2]
+    off_n = artifact.regime_error_stats["a"]["off"][2]
+    assert on_n + off_n == 400 - 3  # 윈도우 수
+    assert set(artifact.error_stats) == {"s", "a", "b"}  # 전체 통계는 그대로
+
+
+def test_train_model_judges_state_on_raw_values_not_normalized_ones():
+    # 상태 태그가 0.0/0.2 사이를 오간다. 원본 기준(>= 0.5)이면 모두 OFF이고,
+    # 정규화된 값(-1/+1)으로 판정하면 절반이 ON이 되어 버린다.
+    groups = {"proc": ("s", ("s", "a"))}
+    samples = _state_samples(400, state_for=lambda i: 0.2 * ((i // 10) % 2))
+
+    artifact = train_model(
+        samples,
+        tags=("s", "a", "b"),
+        window_size=3,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+        groups=groups,
+    )
+
+    assert set(artifact.regime_error_stats["a"]) == {"off"}
+    assert artifact.regime_error_stats["a"]["off"][2] == 400 - 3
+
+
+def test_train_model_logs_states_that_fall_back_to_pooled_stats(capsys):
+    groups = {"proc": ("s", ("s", "a"))}
+    samples = _state_samples(300, state_for=lambda i: 0.0)  # 한 번도 켜지지 않음
+
+    artifact = train_model(
+        samples,
+        tags=("s", "a", "b"),
+        window_size=3,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+        groups=groups,
+    )
+
+    assert "on" not in artifact.regime_error_stats["a"]
+    assert "a(on:0)" in capsys.readouterr().out
+
+
+def test_save_and_load_artifact_preserve_groups_and_regime_stats(tmp_path: Path):
+    groups = {"proc": ("s", ("s", "a")), "general": (None, ("b",))}
+    artifact = train_model(
+        _state_samples(400, state_for=lambda i: float((i // 10) % 2)),
+        tags=("s", "a", "b"),
+        window_size=3,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+        groups=groups,
+    )
+    path = tmp_path / "model.pt"
+    save_artifact(path, artifact)
+
+    loaded = load_artifact(path)
+
+    assert loaded.groups == artifact.groups
+    assert loaded.regime_error_stats == artifact.regime_error_stats
+
+
+def test_load_artifact_without_group_fields_defaults_to_empty(tmp_path: Path):
+    artifact = train_model(
+        _make_samples(30), tags=("a", "b"), window_size=3, epochs=1, hidden_size=4, num_layers=1
+    )
+    path = tmp_path / "legacy.pt"
+    save_artifact(path, artifact)
+    data = torch.load(path, weights_only=False)
+    del data["groups"]
+    del data["regime_error_stats"]
+    torch.save(data, path)
+
+    loaded = load_artifact(path)
+
+    assert loaded.groups == {} and loaded.regime_error_stats == {}
+
+
+def test_make_train_fn_passes_groups_to_the_artifact(tmp_path: Path):
+    groups = {"proc": ("s", ("s", "a")), "general": (None, ("b",))}
+    model_path = tmp_path / "m.pt"
+    train_fn = make_train_fn(
+        tags=("s", "a", "b"),
+        window_size=3,
+        model_path=model_path,
+        resample_interval_ms=100,
+        groups=groups,
+        epochs=1,
+        hidden_size=4,
+        num_layers=1,
+    )
+
+    train_fn(_state_samples(400, state_for=lambda i: float((i // 10) % 2)))
+
+    assert load_artifact(model_path).groups == groups
