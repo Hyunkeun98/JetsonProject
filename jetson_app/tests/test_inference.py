@@ -193,3 +193,95 @@ def test_real_trained_grouped_artifact_scores_without_error():
 
     assert set(result.group_results) == {"proc", "general"}
     assert not math.isnan(result.anomaly_score)
+
+
+# ---- 점수 대상과 입력 전용 태그 ----
+
+
+def _context_artifact():
+    # a: 점수 대상, s: 점수 밖 상태 태그, c: 어느 그룹에도 없는 입력 전용 태그
+    tags = ("a", "s", "c")
+    model = AnomalyGRU(
+        num_tags=3, continuous_indices=[0, 1, 2], binary_indices=[], hidden_size=2, num_layers=1
+    )
+    return ModelArtifact(
+        tags=tags,
+        tag_types={t: "continuous" for t in tags},
+        norm_stats={t: (0.0, 1.0) for t in tags},
+        # s와 c는 표준편차가 아주 작아 오차가 조금만 커도 z가 폭발한다.
+        error_stats={"a": (0.5, 0.5), "s": (0.0, 0.01), "c": (0.0, 0.01)},
+        window_size=2,
+        hidden_size=2,
+        num_layers=1,
+        state_dict=model.state_dict(),
+        resample_interval_ms=100,
+        groups={"proc": ("s", ("a",))},
+        regime_error_stats={"a": {"on": (1.0, 1.0, 200), "off": (0.1, 0.05, 200)}},
+    )
+
+
+def _score_context(monkeypatch, state_value, errors, window_c=0.0):
+    injected = {tag: torch.tensor([value]) for tag, value in errors.items()}
+    monkeypatch.setattr(inference_module, "compute_raw_errors", lambda *args, **kwargs: injected)
+    engine = InferenceEngine(_context_artifact())
+    window = [Snapshot(values={"a": 0.0, "s": 0.0, "c": window_c}) for _ in range(2)]
+    actual = Snapshot(values={"a": 0.0, "s": state_value, "c": 0.0})
+    return engine.score(window, actual)
+
+
+def test_unscored_state_and_context_tags_never_affect_the_score(monkeypatch):
+    errors = {"a": 0.6, "s": 9.0, "c": 9.0}  # s, c의 오차는 매우 크지만 점수 대상이 아니다
+
+    result = _score_context(monkeypatch, state_value=1.0, errors=errors)
+
+    assert set(result.group_results) == {"proc"}
+    assert result.group_results["proc"] == GroupResult(score=pytest.approx(-0.4), top_tag="a")
+    assert result.anomaly_score == pytest.approx(-0.4)  # 동작 기준 (0.6-1.0)/1.0, s/c의 z(900)는 무시
+    assert result.top_deviant_tag == "a"
+
+
+def test_state_tag_outside_scored_tags_still_selects_the_regime(monkeypatch):
+    errors = {"a": 0.6, "s": 9.0, "c": 9.0}
+
+    off = _score_context(monkeypatch, state_value=0.0, errors=errors)
+
+    assert off.anomaly_score == pytest.approx((0.6 - 0.1) / 0.05)  # 대기 기준
+
+
+def test_score_is_none_when_no_scored_tag_has_an_error(monkeypatch):
+    result = _score_context(monkeypatch, state_value=1.0, errors={"s": 1.0, "c": 1.0})
+
+    assert result is None
+
+
+def test_score_is_none_when_a_context_tag_is_unobserved_in_the_window():
+    engine = InferenceEngine(_context_artifact())
+    window = [Snapshot(values={"a": 0.0, "s": 0.0, "c": None}) for _ in range(2)]
+
+    result = engine.score(window, Snapshot(values={"a": 0.0, "s": 1.0, "c": 0.0}))
+
+    assert result is None  # 입력 전용 태그 토픽이 오지 않으면 채점이 멈춘다(README에 안내)
+
+
+def test_real_trained_artifact_with_context_tag_scores_only_the_scored_group():
+    groups = {"proc": ("s", ("a",))}
+    samples = [
+        CalibrationSample(
+            timestamp=f"t{i}",
+            values={"s": float((i // 10) % 2), "a": float(i % 7), "c": float(i % 5)},
+        )
+        for i in range(400)
+    ]
+    artifact = train_model(
+        samples, tags=("a", "s", "c"), window_size=3, epochs=1, hidden_size=4, num_layers=1,
+        groups=groups,
+    )
+    engine = InferenceEngine(artifact)
+    window = [Snapshot(values={"a": 1.0, "s": 1.0, "c": float(i)}) for i in range(3)]
+
+    result = engine.score(window, Snapshot(values={"a": 2.0, "s": 1.0, "c": 3.0}))
+
+    assert set(artifact.regime_error_stats) == {"a"}  # 점수 대상 태그만 상태별 기준이 있다
+    assert set(result.group_results) == {"proc"}
+    assert result.top_deviant_tag == "a"
+    assert not math.isnan(result.anomaly_score)

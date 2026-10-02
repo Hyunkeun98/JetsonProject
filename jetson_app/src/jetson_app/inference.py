@@ -53,6 +53,8 @@ class InferenceEngine:
             if state_tag is not None
             for tag in tags
         }
+        # 점수를 내는 태그(그룹의 tags). 점수 밖 상태 태그와 입력 전용 태그는 예측만 하고 채점하지 않는다.
+        self._scored_tags = tuple(tag for _state, tags in self._groups.values() for tag in tags)
 
     def score(self, window: list[Snapshot], actual: Snapshot) -> AnomalyResult | None:
         """window(길이 window_size, 오래된→최신 순)로 다음 시점을 예측하고, 실제로
@@ -91,18 +93,14 @@ class InferenceEngine:
 
         actual_values = dict(zip(self._tags, actual_row))
         z_by_tag: dict[str, float] = {}
-        best_tag: str | None = None
-        best_z: float | None = None
-        for tag, err_tensor in raw_errors.items():
-            raw_error = err_tensor.item()
+        for tag in self._scored_tags:
+            err_tensor = raw_errors.get(tag)
+            if err_tensor is None:
+                continue
             error_mean, error_std = self._stats_for(
                 tag, actual_values.get(self._state_tag_of.get(tag))
             )
-            z = (raw_error - error_mean) / error_std
-            z_by_tag[tag] = z
-            if best_z is None or z > best_z:
-                best_z = z
-                best_tag = tag
+            z_by_tag[tag] = (err_tensor.item() - error_mean) / error_std
 
         group_results: dict[str, GroupResult] = {}
         for name, (_state_tag, group_tags) in self._groups.items():
@@ -116,8 +114,15 @@ class InferenceEngine:
             if group_best_tag is not None:
                 group_results[name] = GroupResult(score=group_best_z, top_tag=group_best_tag)
 
+        if not group_results:
+            return None
+
+        # 전체 점수는 점수 대상 그룹의 점수 중 최댓값이다(점수 밖 태그는 영향을 주지 않는다).
+        top_group = max(group_results.values(), key=lambda group: group.score)
         return AnomalyResult(
-            anomaly_score=best_z, top_deviant_tag=best_tag, group_results=group_results
+            anomaly_score=top_group.score,
+            top_deviant_tag=top_group.top_tag,
+            group_results=group_results,
         )
 
     def _stats_for(self, tag: str, state_value: float | None) -> tuple[float, float]:
