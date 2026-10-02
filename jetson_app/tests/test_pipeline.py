@@ -665,3 +665,100 @@ def test_flat_pipeline_publishes_the_original_three_fields(tmp_path):
         "jetson:alarm",
         "jetson:top_deviant_tag",
     }
+
+
+# ---- 점수 대상 / 입력 전용 태그 ----
+
+
+def _context_config(equipment_id, window_size=3, min_samples=10):
+    # _send는 첫 태그에 float(i), 나머지에 i % 2를 넣는다.
+    # a: 점수 대상, s: 점수 밖 상태 태그, c: 입력 전용 태그.
+    base = _e2e_config(
+        equipment_id, tags=("a", "s", "c"), window_size=window_size, min_samples=min_samples
+    )
+    return replace(
+        base,
+        groups=(GroupConfig(name="proc", state_tag="s", tags=("a",)),),
+        context_tags=("c",),
+    )
+
+
+def test_context_pipeline_trains_on_all_inputs_and_scores_only_the_scored_tag(tmp_path):
+    config = _context_config("e2e_ctx_publish")
+    model_dir = tmp_path / "model_data"
+    pipeline = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=_train_fn_for(config, model_dir),
+    )
+    _feed(pipeline, config.tags, 0, 20)
+    _send_train(pipeline)
+    assert pipeline.calibration_manager.state == CalibrationState.MONITORING
+
+    artifact = load_artifact(model_dir / f"{config.equipment_id}.pt")
+    assert artifact.tags == ("a", "s", "c")
+    assert artifact.groups == config.group_specs() == {"proc": ("s", ("a",))}
+
+    published = []
+
+    def _fake_publish(topic, payload):
+        published.append((topic, payload))
+        return SimpleNamespace(rc=0)
+
+    pipeline.mqtt_subscriber.client.publish = _fake_publish
+    _feed(pipeline, config.tags, 20, 30)
+
+    assert published, "MONITORING 진입 후에도 이상 점수가 발행되지 않았다"
+    record = json.loads(published[0][1])["records"][0]
+    assert record["jetson:top_deviant_tag"] == "a"
+
+
+def test_context_pipeline_resumes_monitoring_after_restart(tmp_path):
+    config = _context_config("e2e_ctx_resume")
+    model_dir = tmp_path / "model_data"
+    train_fn = _train_fn_for(config, model_dir)
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    _feed_and_train(first, config.tags)
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+
+    second = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+
+    assert second.calibration_manager.state == CalibrationState.MONITORING
+    assert second.inference_engine_holder.get() is not None
+
+
+def test_pipeline_falls_back_to_calibrating_when_context_tags_changed(tmp_path):
+    config = _context_config("e2e_ctx_changed")
+    model_dir = tmp_path / "model_data"
+    train_fn = _train_fn_for(config, model_dir)
+    first = build_pipeline(
+        config=config,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+    _feed_and_train(first, config.tags)
+    assert first.calibration_manager.state == CalibrationState.MONITORING
+
+    # "재시작": 입력 전용 태그 c가 c2로 바뀐 설정(모델 입력 태그가 달라진다)
+    changed = replace(config, tags=("a", "s", "c2"), context_tags=("c2",))
+    second = build_pipeline(
+        config=changed,
+        calibration_dir=tmp_path / "calibration_data",
+        model_dir=model_dir,
+        train_fn=train_fn,
+    )
+
+    assert second.calibration_manager.state == CalibrationState.CALIBRATING
+    assert second.inference_engine_holder.get() is None
