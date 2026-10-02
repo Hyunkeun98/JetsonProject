@@ -2,6 +2,8 @@
 
 Jetson 쪽 실시간 이상탐지 프레임워크의 통신 + 데이터 파이프라인 레이어. DX1(SpeeDBee Synapse)이 MQTT로 Publish하는 설비 태그 데이터를 여러 토픽에서 구독해 각 record의 `timestamp`(이벤트 시각)를 기준으로 `resample_interval_ms` 격자에 배치(이벤트 시간 리샘플러)하고, 확정된 칸을 슬라이딩 윈도우와 캘리브레이션 버퍼에 쌓는다. MQTT 명령으로 학습(train)/재캘리브레이션(recalibrate) 상태 전이를 제어한다.
 
+**처음 쓰는 사람은 [`../docs/USER_GUIDE.md`](../docs/USER_GUIDE.md)(사용 안내서)부터 보세요.** 아래는 개발자용 상세 설명입니다.
+
 전체 설계 배경은 [`../docs/superpowers/specs/2026-07-31-jetson-dx1-anomaly-framework-design.md`](../docs/superpowers/specs/2026-07-31-jetson-dx1-anomaly-framework-design.md), 이 통신 레이어의 구현 계획은 [`../docs/superpowers/plans/2026-08-03-jetson-mqtt-communication-layer.md`](../docs/superpowers/plans/2026-08-03-jetson-mqtt-communication-layer.md) 참고.
 
 현재 범위: 설비 config 로더(다중 토픽) + MQTT 파싱/구독자 + 이벤트 시간 리샘플러/슬라이딩 윈도우 + 스냅샷 처리 스레드 + 캘리브레이션 저장/상태머신 + MQTT train/recalibrate 명령 구독자 + 설비 통합 PyTorch GRU 모델 학습(태그 타입별 손실, 정규화/오차 통계 저장/로드) + 실시간 이상 점수 계산/디바운스/Result Publisher + CLI 진입점(코드, 유닛테스트 완료).
