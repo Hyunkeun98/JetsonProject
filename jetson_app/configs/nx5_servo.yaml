@@ -1,0 +1,51 @@
+# NX5 데모 라인: 서보 3축(AxX, AxZ, AxCV)의 Pos/Vel/Trq만 이상 판단에 쓴다.
+# ProcStart는 어느 공정이 도는지 알려 주는 조건 신호로만 쓰고 점수에는 반영하지 않는다.
+# TaktTime(U0~U10)은 모델 입력으로만 쓰고 점수에는 반영하지 않는다.
+equipment_id: nx5
+mqtt:
+  subscribe_topics:
+  - dx1/AxisData
+  - dx1/ProcStart
+  - dx1/TaktTime
+  publish_topic: jetson/nx5/anomaly
+  command_topic: jetson/nx5/cmd
+context_tags:
+- NX5_TaktTime:U0_TaktTime
+- NX5_TaktTime:U1_TaktTime
+- NX5_TaktTime:U2_TaktTime
+- NX5_TaktTime:U3_TaktTime
+- NX5_TaktTime:U4_TaktTime
+- NX5_TaktTime:U5_TaktTime
+- NX5_TaktTime:U6_TaktTime
+- NX5_TaktTime:U7_TaktTime
+- NX5_TaktTime:U8_TaktTime
+- NX5_TaktTime:U9_TaktTime
+- NX5_TaktTime:U10_TaktTime
+groups:
+  axis_x:
+    state_tag: NX5_ProcStart:U0_ProcStart
+    tags:
+    - NX5_AxisData:AxX_Act_Pos
+    - NX5_AxisData:AxX_Act_Vel
+    - NX5_AxisData:AxX_Act_Trq
+  axis_z:
+    state_tag: NX5_ProcStart:U4_ProcStart
+    tags:
+    - NX5_AxisData:AxZ_Act_Pos
+    - NX5_AxisData:AxZ_Act_Vel
+    - NX5_AxisData:AxZ_Act_Trq
+  axis_cv:
+    state_tag: NX5_ProcStart:U9_ProcStart
+    tags:
+    - NX5_AxisData:AxCV_Act_Pos
+    - NX5_AxisData:AxCV_Act_Vel
+    - NX5_AxisData:AxCV_Act_Trq
+resample_interval_ms: 100
+max_lateness_ms: 500
+window_size: 30
+calibration:
+  max_duration: 7d
+  min_samples: 3000
+training:
+  max_samples: 45000
+  epochs: 20

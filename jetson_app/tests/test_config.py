@@ -416,3 +416,23 @@ def test_context_tags_with_flat_tags_config_is_rejected(tmp_path):
 
     with pytest.raises(ConfigError, match="context_tags.*groups"):
         _load_text(tmp_path, text)
+
+
+def test_nx5_servo_config_scores_only_the_servo_axes():
+    from pathlib import Path
+
+    path = Path(__file__).parent.parent / "configs" / "nx5_servo.yaml"
+    config = load_equipment_config(path)
+
+    assert [g.name for g in config.groups] == ["axis_x", "axis_z", "axis_cv"]
+    assert {g.name: g.state_tag for g in config.groups} == {
+        "axis_x": "NX5_ProcStart:U0_ProcStart",
+        "axis_z": "NX5_ProcStart:U4_ProcStart",
+        "axis_cv": "NX5_ProcStart:U9_ProcStart",
+    }
+    scored = [tag for g in config.groups for tag in g.tags]
+    assert len(scored) == 9
+    assert all(tag.startswith("NX5_AxisData:Ax") for tag in scored)
+    assert config.context_tags == tuple(f"NX5_TaktTime:U{n}_TaktTime" for n in range(11))
+    assert len(config.tags) == 9 + 3 + 11
+    assert set(config.subscribe_topics) == {"dx1/AxisData", "dx1/ProcStart", "dx1/TaktTime"}

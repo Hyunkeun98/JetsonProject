@@ -213,6 +213,25 @@ training: {max_samples: 60000, epochs: 20}       # 선택(기본 20000 / 20)
 - 학습 후 **그룹 구성(이름, 상태 태그, 태그)을 바꾸면** 저장된 모델과 맞지 않아 재시작 시 `CALIBRATING`으로 폴백한다. 이때는 `recalibrate`로 버퍼를 비우고 다시 학습한다.
 - `training.max_samples`는 학습에 쓰는 가장 최근 스텝 수의 상한이다. 90분(100ms 격자 약 54,000스텝)을 모두 쓰려면 이 값을 올린다. 학습 시간과 메모리도 함께 늘어난다.
 
+### 점수 대상 태그와 입력 전용 태그
+
+모델은 설정에 적힌 **모든 태그**를 입력으로 받아 다음 스텝을 예측하지만, 이상 점수와 알람은 **그룹의 `tags`에 적은 태그만**으로 계산한다. 점수에서 빼고 싶은 신호는 아래 두 가지 방법으로 입력에만 쓸 수 있다.
+
+```yaml
+context_tags: ["NX5_TaktTime:U0_TaktTime", "NX5_TaktTime:U4_TaktTime"]   # 입력만, 점수 제외 (groups와 함께만 사용)
+groups:
+  axis_z:
+    state_tag: "NX5_ProcStart:U4_ProcStart"   # tags 밖에 두면 입력 전용 조건 신호가 된다
+    tags: ["NX5_AxisData:AxZ_Act_Pos", "NX5_AxisData:AxZ_Act_Vel", "NX5_AxisData:AxZ_Act_Trq"]
+```
+
+- `state_tag`는 그 그룹의 정상 기준을 동작 중/대기 중으로 나누는 조건이다. `tags` 안에 두면 이전처럼 점수에도 반영되고, 밖에 두면 점수에는 반영되지 않는다.
+- 전체 점수는 그룹 점수의 최댓값이다. 입력 전용 태그의 오차는 점수나 알람에 영향을 주지 않는다.
+- 켜짐/꺼짐 신호나 계단형 값(`ProcStart`, `TaktTime`, 센서)은 값이 바뀌는 순간의 시각이 조금씩 달라서 예측 오차가 크게 나오고 오탐의 원인이 된다. 이런 신호는 점수 대상이 아니라 `state_tag`나 `context_tags`로 쓰는 것을 권한다.
+- **입력 전용 태그의 토픽이 오지 않으면 채점이 멈춘다.** 모델은 모든 입력 태그가 한 번씩 관측돼야 채점을 시작하므로, `context_tags`에 넣은 태그의 토픽이 구독돼 있고 발행되고 있는지 확인한다.
+- `context_tags`나 `state_tag`를 바꾸면 모델 입력 태그가 달라져 저장된 모델과 맞지 않으므로, 재시작 시 `CALIBRATING`으로 폴백한다. `recalibrate`로 다시 학습한다.
+- 예: `configs/nx5_servo.yaml`은 서보 3축 9개 값만 점수로 쓰고, `ProcStart` 3개를 조건으로, `TaktTime` 11개를 입력 전용으로 쓴다.
+
 ### 새 설비를 붙이는 순서
 
 1. **받을 데이터를 엑셀에 적는다.** 열은 `Variables`, `MQTT Topic`(필수)과 `Description`, `Tag`, `Group`, `StateTag`(선택)이다. `Tag`는 DX1이 내보내는 정확한 태그 이름이고, 없으면 `<접두사>_<토픽 마지막 마디>:<변수명의 '.'를 '_'로>`로 만든다. `Group`이 비어 있으면 `general`, `StateTag`에 `Y`를 적으면 그 행이 그룹의 상태 태그다. `Group` 열이 없으면 `--group-regex`로 `Description`에서 그룹을 찾을 수 있다.
