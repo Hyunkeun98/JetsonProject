@@ -297,10 +297,22 @@ def test_tag_in_two_groups_is_rejected(tmp_path):
         _load_text(tmp_path, _groups_yaml_with(block))
 
 
-def test_state_tag_must_be_one_of_the_group_tags(tmp_path):
-    block = 'groups:\n  a:\n    state_tag: "z"\n    tags: ["x", "y"]\n'
+@pytest.mark.parametrize("bad", ["5", "''"])
+def test_state_tag_must_be_a_non_empty_string(tmp_path, bad):
+    block = f'groups:\n  a:\n    state_tag: {bad}\n    tags: ["x"]\n'
     with pytest.raises(ConfigError, match="state_tag"):
         _load_text(tmp_path, _groups_yaml_with(block))
+
+
+def test_state_tag_may_be_outside_the_scored_tags_and_becomes_a_model_input(tmp_path):
+    block = 'groups:\n  a:\n    state_tag: "z"\n    tags: ["x", "y"]\n'
+
+    config = _load_text(tmp_path, _groups_yaml_with(block))
+
+    assert config.groups[0].state_tag == "z"
+    assert config.groups[0].tags == ("x", "y")  # 점수 대상은 x, y뿐
+    assert config.tags == ("x", "y", "z")  # 모델 입력에는 z도 들어간다
+    assert config.group_specs() == {"a": ("z", ("x", "y"))}
 
 
 def test_alarm_and_training_defaults(tmp_path):
@@ -351,3 +363,56 @@ def test_group_specs_maps_each_group_to_state_tag_and_tags(tmp_path):
         "general": (None, ("S:ConvSensor0",)),
     }
     assert flat.group_specs() == {"all": (None, flat.tags)}
+
+
+def _with_context(block):
+    return GROUPS_YAML.replace("groups:\n", block + "groups:\n", 1)
+
+
+def test_context_tags_are_model_inputs_but_not_scored(tmp_path):
+    config = _load_text(tmp_path, _with_context('context_tags: ["C:U0_TaktTime", "C:U4_TaktTime"]\n'))
+
+    assert config.context_tags == ("C:U0_TaktTime", "C:U4_TaktTime")
+    assert config.tags[-2:] == ("C:U0_TaktTime", "C:U4_TaktTime")
+    scored = {tag for _state, tags in config.group_specs().values() for tag in tags}
+    assert not scored & set(config.context_tags)
+
+
+def test_model_input_order_is_scored_then_state_only_then_context_without_duplicates(tmp_path):
+    block = (
+        'context_tags: ["c1"]\n'
+        "groups:\n"
+        '  a:\n    state_tag: "s"\n    tags: ["x", "y"]\n'
+        '  b:\n    state_tag: "s"\n    tags: ["w"]\n'  # 같은 상태 태그를 두 그룹이 공유
+    )
+
+    config = _load_text(tmp_path, _groups_yaml_with(block))
+
+    assert config.tags == ("x", "y", "w", "s", "c1")  # s는 한 번만
+
+
+def test_context_tags_default_to_empty(tmp_path):
+    assert _load_text(tmp_path, GROUPS_YAML).context_tags == ()
+
+
+@pytest.mark.parametrize(
+    "block, needle",
+    [
+        ("context_tags: []\n", "context_tags"),
+        ('context_tags: "x"\n', "context_tags"),
+        ("context_tags: [5]\n", "context_tags"),
+        ('context_tags: ["c", "c"]\n', "more than once"),
+        ('context_tags: ["A:AxX_Act_Pos"]\n', "already used"),  # 점수 태그와 중복
+        ('context_tags: ["P:U0_ProcStart"]\n', "already used"),  # 상태 태그와 중복
+    ],
+)
+def test_invalid_context_tags_are_rejected(tmp_path, block, needle):
+    with pytest.raises(ConfigError, match=needle):
+        _load_text(tmp_path, _with_context(block))
+
+
+def test_context_tags_with_flat_tags_config_is_rejected(tmp_path):
+    text = _groups_yaml_with('context_tags: ["c"]\ntags: ["x", "y"]\n')
+
+    with pytest.raises(ConfigError, match="context_tags.*groups"):
+        _load_text(tmp_path, text)

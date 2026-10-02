@@ -82,6 +82,9 @@ class EquipmentConfig:
     groups: tuple[GroupConfig, ...] = ()
     alarm: AlarmConfig = AlarmConfig()
     training: TrainingConfig = TrainingConfig()
+    # 모델 입력으로만 쓰고 점수에는 반영하지 않는 태그. `tags`는 점수 태그, 점수 밖 상태 태그,
+    # 이 태그를 모두 합한 모델 입력 태그다(학습/MQTT 필터/모델 호환성 검사가 이 값을 쓴다).
+    context_tags: tuple[str, ...] = ()
 
     def resolved_groups(self) -> tuple[GroupConfig, ...]:
         """groups가 있으면 그대로, 평면 tags 설정이면 상태 태그 없는 단일 그룹 'all'."""
@@ -113,8 +116,8 @@ def _parse_groups(raw: object) -> tuple[GroupConfig, ...]:
         if not isinstance(tags, list) or not tags:
             raise ConfigError(f"group '{name}': tags must be a non-empty list")
         state_tag = body.get("state_tag")
-        if state_tag is not None and (not isinstance(state_tag, str) or state_tag not in tags):
-            raise ConfigError(f"group '{name}': state_tag must be one of the group's tags")
+        if state_tag is not None and (not isinstance(state_tag, str) or not state_tag):
+            raise ConfigError(f"group '{name}': state_tag must be a non-empty string")
         for tag in tags:
             if tag in owner:
                 raise ConfigError(
@@ -123,6 +126,37 @@ def _parse_groups(raw: object) -> tuple[GroupConfig, ...]:
             owner[tag] = name
         groups.append(GroupConfig(name=name, state_tag=state_tag, tags=tuple(tags)))
     return tuple(groups)
+
+
+def _parse_context_tags(raw: object, groups: tuple[GroupConfig, ...]) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not raw or not all(isinstance(t, str) and t for t in raw):
+        raise ConfigError("context_tags must be a non-empty list of tag names")
+    seen: set[str] = set()
+    for tag in raw:
+        if tag in seen:
+            raise ConfigError(f"context_tags: tag '{tag}' is listed more than once")
+        seen.add(tag)
+    taken = {tag for g in groups for tag in g.tags} | {g.state_tag for g in groups if g.state_tag}
+    for tag in raw:
+        if tag in taken:
+            raise ConfigError(
+                f"context_tags: tag '{tag}' is already used by a group (tags or state_tag)"
+            )
+    return tuple(raw)
+
+
+def _model_input_tags(groups: tuple[GroupConfig, ...], context_tags: tuple[str, ...]) -> tuple[str, ...]:
+    """점수 태그(그룹 순서), 점수 밖 상태 태그, 입력 전용 태그 순서로 중복 없이 합친다."""
+    ordered: list[str] = []
+    for source in (
+        [tag for g in groups for tag in g.tags],
+        [g.state_tag for g in groups if g.state_tag],
+        list(context_tags),
+    ):
+        for tag in source:
+            if tag not in ordered:
+                ordered.append(tag)
+    return tuple(ordered)
 
 
 def _parse_alarm(raw: object) -> AlarmConfig:
@@ -177,11 +211,17 @@ def load_equipment_config(path: str | Path) -> EquipmentConfig:
         raise ConfigError("use either 'tags' or 'groups', not both")
     if "tags" not in data and "groups" not in data:
         raise ConfigError("missing required field: tags (or groups)")
+    if "context_tags" in data and "groups" not in data:
+        raise ConfigError("context_tags can only be used together with 'groups'")
     if "groups" in data:
         groups = _parse_groups(data["groups"])
-        tags = [tag for group in groups for tag in group.tags]
+        context_tags = (
+            _parse_context_tags(data["context_tags"], groups) if "context_tags" in data else ()
+        )
+        tags = _model_input_tags(groups, context_tags)
     else:
         groups = ()
+        context_tags = ()
         tags = data["tags"]
         if not isinstance(tags, list) or not tags:
             raise ConfigError("tags must be a non-empty list")
@@ -228,4 +268,5 @@ def load_equipment_config(path: str | Path) -> EquipmentConfig:
         groups=groups,
         alarm=alarm,
         training=training,
+        context_tags=context_tags,
     )
