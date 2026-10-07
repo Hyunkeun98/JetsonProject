@@ -5,7 +5,9 @@ import sys
 
 from .config import ConfigError, load_equipment_config
 from .pipeline import build_pipeline
+from .score_history import DEFAULT_HISTORY_SECONDS
 from .training import make_train_fn, model_artifact_path
+from .web_server import ScoreWebServer
 
 
 def main() -> None:
@@ -22,6 +24,17 @@ def main() -> None:
         "--model-dir",
         default="model_data",
         help="학습된 모델 아티팩트를 저장할 디렉터리 (기본: model_data)",
+    )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=None,
+        help="이 포트로 점수 그래프 웹 화면을 연다 (예: 8080). 주지 않으면 웹 화면을 켜지 않는다",
+    )
+    parser.add_argument(
+        "--web-host",
+        default="127.0.0.1",
+        help="웹 화면을 열 주소 (기본: 127.0.0.1, 이 장비에서만). 같은 네트워크의 다른 PC에서 보려면 0.0.0.0",
     )
     args = parser.parse_args()
 
@@ -46,12 +59,14 @@ def main() -> None:
             calibration_dir=args.calibration_dir,
             model_dir=args.model_dir,
             train_fn=train_fn,
+            history_seconds=DEFAULT_HISTORY_SECONDS if args.web_port is not None else 0,
         )
         pipeline.mqtt_subscriber.connect(args.host, args.port)
     except (ConfigError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         raise SystemExit(2)
 
+    web_server = _start_web(args, config, pipeline)
     pipeline.snapshotter.start()
     print(
         f"[{config.equipment_id}] {len(config.subscribe_topics)}개 토픽 구독 시작 "
@@ -64,6 +79,37 @@ def main() -> None:
         print("\n중단됨")
     finally:
         pipeline.snapshotter.stop()
+        if web_server is not None:
+            web_server.stop()
+
+
+def _start_web(args, config, pipeline):
+    """--web-port가 있으면 점수 그래프 웹 서버를 연다. 열지 못해도 앱은 웹 없이 계속 돈다."""
+    if args.web_port is None or pipeline.history is None:
+        return None
+    manager = pipeline.calibration_manager
+
+    def meta() -> dict:
+        return {
+            "equipment_id": config.equipment_id,
+            "groups": list(pipeline.history.group_names),
+            "threshold": config.alarm.threshold,
+            "confirm_steps": config.alarm.confirm_steps,
+            "interval_ms": config.resample_interval_ms,
+            "history_seconds": DEFAULT_HISTORY_SECONDS,
+            "state": manager.state.value,
+        }
+
+    try:
+        server = ScoreWebServer(pipeline.history, meta, host=args.web_host, port=args.web_port)
+    except OSError as e:
+        print(f"[web] 웹 화면을 열지 못했습니다(앱은 계속 실행됩니다): {e}", file=sys.stderr)
+        return None
+    server.start()
+    print(f"[web] 점수 그래프: http://{args.web_host}:{server.port}/")
+    if args.web_host not in ("127.0.0.1", "localhost", "::1"):
+        print("[web] 경고: 이 화면에는 로그인이 없습니다. 같은 네트워크의 누구나 볼 수 있습니다", file=sys.stderr)
+    return server
 
 
 if __name__ == "__main__":

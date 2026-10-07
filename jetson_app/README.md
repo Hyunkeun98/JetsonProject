@@ -274,3 +274,12 @@ uv run jetson-threshold --scores scores.csv --config configs/nx5_servo.yaml --co
 - **점수 CSV**: 스텝마다 그룹별 점수/원인 태그와 윈도우 리셋 표시. 앱 처리기와 같은 점수를 낸다(테스트 및 run1 10,166행 일치 확인).
 - **임계값 계산**: 알람은 그룹마다 "점수 ≥ 임계값이 `confirm`번 연속", 전체는 OR이다. 길이 `confirm`인 창의 최솟값 중 최댓값(임계 점수 c)을 쓰면 임계값 T에서 알람이 나는 조건이 `T ≤ c`이다. 정상 구간의 c로 오탐 0건 최소값(T0), 이상 구간의 c로 모두 검출하는 최대값(T1)을 얻고, 후보 표는 앱의 디바운서로 시뮬레이션한다. 추천: 이상 없음 → `T0×1.2`(`--margin`, 또는 `--max-alarms-per-day N`), 이상 있음 → `T0 ≤ T1`이면 가운데, 아니면 추천 없음. 최소 추천값은 2.0, 이상 구간이 3개 미만이면 과적합 경고를 낸다.
 
+## 점수 그래프 화면
+
+그룹별 이상 점수와 임계값을 선 그래프로 본다(읽기 전용, 외부 라이브러리/CDN 없음). 설계: `../docs/superpowers/specs/2026-10-07-score-dashboard-design.md`.
+
+- **실시간**: `jetson-app ... --web-port 8080`이면 `http://127.0.0.1:8080/`에 화면이 열린다. 옵션이 없으면 이력도 서버도 만들지 않는다(`build_pipeline(history_seconds=0)`). 기본 바인딩은 `127.0.0.1`이고, `--web-host 0.0.0.0`이면 로그인이 없다는 경고를 출력한다. 포트를 열지 못해도 앱은 웹 없이 계속 돈다.
+  - 점수 이력은 `ScoreHistory`(최근 3600초 링 버퍼, 재시작하면 사라짐)에 `HistoryRecordingPublisher`가 기록한다. 원래 MQTT 발행을 먼저 하고 이력 기록 실패는 삼킨다.
+  - API(GET): `/`, `/healthz`, `/api/meta`, `/api/scores?seconds=S&max_points=N`. 긴 범위는 구간마다 그룹별 최댓값만 남겨 짧은 튐이 사라지지 않는다.
+- **저장된 점수**: `jetson-plot --scores scores.csv [--config C] [--threshold T] [--confirm N] --out plot.html`. 데이터를 HTML에 내장해 서버 없이 열린다. 임계값/연속 횟수 슬라이더로 알람 구간과 요약(정상 알람 건수, 이상 검출)을 즉시 다시 계산한다. 이 계산(`dashboard.html`의 `BEGIN-CORE`~`END-CORE`)은 앱의 `Debouncer`와 같은 규칙이며, 테스트가 Node로 실행해 파이썬 결과와 비교한다.
+

@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>이상 점수</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f4f6f9; --card: #ffffff; --text: #1b2430; --muted: #596677; --border: #dde2ea;
+  --line: #1d5fd1; --thr: #c0262d; --alarm-fill: rgba(192,38,45,.15); --grid: #e4e8ef;
+  --band-normal: rgba(46,125,50,.09); --band-anomaly: rgba(214,120,20,.16);
+  --ok: #2e7d32; --warn-bg: #fff4d6; --warn-text: #6a4a00;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #10151c; --card: #19212b; --text: #e7ecf3; --muted: #9aa8ba; --border: #2b3644;
+    --line: #6fa8ff; --thr: #ff8078; --alarm-fill: rgba(255,128,120,.2); --grid: #263140;
+    --band-normal: rgba(102,187,106,.1); --band-anomaly: rgba(255,167,38,.16);
+    --ok: #7bd081; --warn-bg: #3a2f10; --warn-text: #ffd98a;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #10151c; --card: #19212b; --text: #e7ecf3; --muted: #9aa8ba; --border: #2b3644;
+  --line: #6fa8ff; --thr: #ff8078; --alarm-fill: rgba(255,128,120,.2); --grid: #263140;
+  --band-normal: rgba(102,187,106,.1); --band-anomaly: rgba(255,167,38,.16);
+  --ok: #7bd081; --warn-bg: #3a2f10; --warn-text: #ffd98a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, "Segoe UI", "Malgun Gothic", sans-serif; }
+.wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 12px; }
+h1 { font-size: 18px; margin: 0; }
+.meta { color: var(--muted); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 12px;
+  padding: 10px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
+.controls label { display: inline-flex; gap: 6px; align-items: center; }
+.controls input[type=number] { width: 72px; }
+.controls input[type=range] { width: 220px; max-width: 60vw; }
+button, select, input { font: inherit; color: var(--text); background: var(--card);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
+button { cursor: pointer; }
+.summary { flex-basis: 100%; color: var(--muted); }
+.banner { margin-bottom: 12px; padding: 8px 12px; border-radius: 8px;
+  background: var(--warn-bg); color: var(--warn-text); }
+#grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.card h2 { font-size: 15px; margin: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.sub { color: var(--muted); font-size: 12.5px; min-height: 1.4em; }
+.badge { font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--ok); }
+.badge.alarm { background: var(--thr); border-color: var(--thr); color: #fff; }
+canvas { width: 100%; height: 230px; display: block; margin-top: 6px; }
+#tip { position: fixed; z-index: 5; pointer-events: none; display: none; max-width: 320px;
+  background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px; font-size: 12.5px; white-space: pre-line; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+.empty { padding: 28px 12px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="title">이상 점수</h1>
+    <span class="meta" id="meta"></span>
+  </header>
+  <div id="banner" class="banner" hidden></div>
+  <div class="controls" id="controls"></div>
+  <div id="grid"></div>
+</div>
+<div id="tip" role="tooltip"></div>
+<script>
+const BOOT = /*__BOOT__*/null;
+
+// BEGIN-CORE
+// 앱의 Debouncer(debounce.py)와 같은 규칙: 점수 >= 임계값이 confirm번 연속이면 알람, reset 행에서 초기화.
+// 점수가 null인 행은 갱신하지 않고(카운터 유지) 알람도 아니다(앱이 그 그룹을 갱신하지 않는 것과 같다).
+function runAlarms(scores, resets, threshold, confirm) {
+  const out = new Array(scores.length);
+  let count = 0;
+  for (let i = 0; i < scores.length; i++) {
+    if (resets[i]) count = 0;
+    const s = scores[i];
+    if (s === null || s === undefined) { out[i] = 0; continue; }
+    if (s >= threshold) count++; else count = 0;
+    out[i] = count >= confirm ? 1 : 0;
+  }
+  return out;
+}
+function orAlarms(list) {
+  const n = list.length ? list[0].length : 0;
+  const out = new Array(n).fill(0);
+  for (const a of list) for (let i = 0; i < n; i++) if (a[i]) out[i] = 1;
+  return out;
+}
+// [i0, i1) 안에서 연속된 알람을 1건으로 센다(reset 행에서 끊는다).
+function countEpisodes(alarm, resets, i0, i1) {
+  let episodes = 0, on = false;
+  for (let i = i0; i < i1; i++) {
+    if (resets[i]) on = false;
+    const a = !!alarm[i];
+    if (a && !on) episodes++;
+    on = a;
+  }
+  return episodes;
+}
+// END-CORE
+
+const $ = (id) => document.getElementById(id);
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const fmt = (v) => (v === null || v === undefined || !isFinite(v)) ? "-" : (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2));
+const fmtTime = (ms) => new Date(ms).toLocaleString("ko-KR", { hour12: false });
+const two = (v) => (v < 10 ? "0" : "") + v;
+const fmtClock = (ms) => { const d = new Date(ms); return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds()); };
+// 시간 축 눈금: 10초, 1분, 5분처럼 읽기 쉬운 간격에 맞춘다.
+function timeTicks(lo, hi, target) {
+  const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+  const want = (hi - lo) / 1000 / Math.max(2, target);
+  const step = (steps.find((v) => v >= want) || 3600) * 1000;
+  const ticks = [];
+  const offset = new Date(lo).getTimezoneOffset() * 60000;  // 지역 시각 기준으로 정렬
+  for (let t = Math.ceil((lo - offset) / step) * step + offset; t <= hi; t += step) ticks.push(t);
+  return ticks;
+}
+
+function el(tag, props, children) {
+  const node = document.createElement(tag);
+  if (props) for (const k of Object.keys(props)) {
+    if (k === "text") node.textContent = props[k]; else node.setAttribute(k, props[k]);
+  }
+  for (const c of children || []) node.appendChild(c);
+  return node;
+}
+
+function niceTicks(lo, hi, target) {
+  const span = hi - lo || 1;
+  const raw = span / target;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10) * mag;
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) ticks.push(Math.round(v / step) * step);
+  return ticks;
+}
+
+// 픽셀 구간마다 최댓값 점 하나만 남겨 점 수를 줄인다(짧은 튐 보존). 반환: 고른 인덱스 목록.
+function pickMax(ys, buckets) {
+  const n = ys.length;
+  if (n <= buckets * 2) { const all = []; for (let i = 0; i < n; i++) all.push(i); return all; }
+  const out = [];
+  for (let b = 0; b < buckets; b++) {
+    const a = Math.floor(b * n / buckets), z = Math.floor((b + 1) * n / buckets);
+    let best = -1;
+    for (let i = a; i < z; i++) {
+      if (ys[i] === null || ys[i] === undefined) continue;
+      if (best < 0 || ys[i] > ys[best]) best = i;
+    }
+    if (best >= 0) out.push(best);
+  }
+  return out;
+}
+
+const tip = $("tip");
+function showTip(text, ev) {
+  tip.textContent = text;
+  tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + w > window.innerWidth - 4) x = ev.clientX - w - 14;
+  if (y + h > window.innerHeight - 4) y = ev.clientY - h - 14;
+  tip.style.left = Math.max(4, x) + "px";
+  tip.style.top = Math.max(4, y) + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+
+// o: {xmin,xmax, xs, ys, pick, breaks(k)->bool, threshold, runs:[[xa,xb]], bands:[{x0,x1,kind,label}],
+//     xTicks:[{x,label}], tipText(k), hover}
+function drawChart(cv, o) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const ml = 46, mr = 12, mt = o.bands && o.bands.length ? 22 : 12, mb = 24;
+  const pw = Math.max(10, W - ml - mr), ph = Math.max(10, H - mt - mb);
+  let ymax = o.threshold * 1.2, ymin = 0;
+  for (const k of o.pick) {
+    const v = o.ys[k];
+    if (v === null || v === undefined) continue;
+    if (v > ymax) ymax = v;
+    if (v < ymin) ymin = v;
+  }
+  if (ymax <= ymin) ymax = ymin + 1;
+  const X = (x) => ml + (x - o.xmin) / ((o.xmax - o.xmin) || 1) * pw;
+  const Y = (y) => mt + ph - (y - ymin) / (ymax - ymin) * ph;
+  const text = cssVar("--muted");
+  g.font = "11.5px system-ui, 'Malgun Gothic', sans-serif";
+
+  for (const b of o.bands || []) {
+    g.fillStyle = cssVar(b.kind === "anomaly" ? "--band-anomaly" : "--band-normal");
+    g.fillRect(X(b.x0), mt, Math.max(1, X(b.x1) - X(b.x0)), ph);
+    g.fillStyle = text; g.textAlign = "left"; g.textBaseline = "top";
+    g.save(); g.beginPath(); g.rect(X(b.x0), 0, Math.max(1, X(b.x1) - X(b.x0)), mt); g.clip();
+    g.fillText(b.label, X(b.x0) + 3, 4);
+    g.restore();
+  }
+  g.strokeStyle = cssVar("--grid"); g.lineWidth = 1; g.fillStyle = text;
+  g.textAlign = "right"; g.textBaseline = "middle";
+  for (const v of niceTicks(ymin, ymax, 4)) {
+    const y = Math.round(Y(v)) + 0.5;
+    g.beginPath(); g.moveTo(ml, y); g.lineTo(ml + pw, y); g.stroke();
+    g.fillText(String(Math.round(v * 100) / 100), ml - 6, y);
+  }
+  g.textAlign = "center"; g.textBaseline = "top";
+  for (const t of o.xTicks || []) g.fillText(t.label, X(t.x), mt + ph + 6);
+
+  g.fillStyle = cssVar("--alarm-fill");
+  for (const [xa, xb] of o.runs || []) g.fillRect(X(xa), mt, Math.max(2, X(xb) - X(xa)), ph);
+
+  const ty = Y(o.threshold);
+  g.strokeStyle = cssVar("--thr"); g.lineWidth = 1.5; g.setLineDash([6, 4]);
+  g.beginPath(); g.moveTo(ml, ty); g.lineTo(ml + pw, ty); g.stroke(); g.setLineDash([]);
+  g.fillStyle = cssVar("--thr"); g.textAlign = "right"; g.textBaseline = "bottom";
+  g.fillText("임계값 " + fmt(o.threshold), ml + pw - 2, ty - 2);
+
+  g.strokeStyle = cssVar("--line"); g.lineWidth = 1.6; g.lineJoin = "round";
+  g.beginPath();
+  let pen = false, prev = -1;
+  for (const k of o.pick) {
+    const v = o.ys[k];
+    if (v === null || v === undefined) { pen = false; prev = -1; continue; }
+    if (pen && prev >= 0 && o.breaks(prev, k)) pen = false;
+    if (!pen) g.moveTo(X(o.xs[k]), Y(v)); else g.lineTo(X(o.xs[k]), Y(v));
+    pen = true; prev = k;
+  }
+  g.stroke();
+  if (o.pick.length === 1) {
+    const k = o.pick[0];
+    g.fillStyle = cssVar("--line"); g.beginPath(); g.arc(X(o.xs[k]), Y(o.ys[k]), 3, 0, 6.3); g.fill();
+  }
+  if (o.hover !== undefined && o.hover !== null) {
+    const k = o.pick[o.hover];
+    if (o.ys[k] !== null && o.ys[k] !== undefined) {
+      g.strokeStyle = text; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(Math.round(X(o.xs[k])) + 0.5, mt); g.lineTo(Math.round(X(o.xs[k])) + 0.5, mt + ph); g.stroke();
+      g.fillStyle = cssVar("--line"); g.beginPath(); g.arc(X(o.xs[k]), Y(o.ys[k]), 4, 0, 6.3); g.fill();
+    }
+  }
+  o._geom = { ml, pw, X };
+}
+
+function attachHover(cv, getO) {
+  cv.addEventListener("mousemove", (ev) => {
+    const o = getO();
+    if (!o || !o.pick.length) return;
+    const r = cv.getBoundingClientRect();
+    const px = ev.clientX - r.left;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < o.pick.length; i++) {
+      const d = Math.abs(o._geom.X(o.xs[o.pick[i]]) - px);
+      if (d < bd) { bd = d; best = i; }
+    }
+    o.hover = best;
+    drawChart(cv, o);
+    showTip(o.tipText(o.pick[best]), ev);
+  });
+  cv.addEventListener("mouseleave", () => {
+    const o = getO();
+    if (o) { o.hover = null; drawChart(cv, o); }
+    hideTip();
+  });
+}
+
+function makeCard(name) {
+  const badge = el("span", { class: "badge", text: "정상" });
+  const sub = el("div", { class: "sub" });
+  const cv = el("canvas", { role: "img", "aria-label": name + " 이상 점수 그래프" });
+  const card = el("section", { class: "card" }, [el("h2", null, [el("span", { text: name }), badge]), sub, cv]);
+  return { card, badge, sub, cv, o: null };
+}
+
+function setBadge(card, alarm, normalText) {
+  card.badge.textContent = alarm ? "ALARM" : (normalText || "정상");
+  card.badge.className = "badge" + (alarm ? " alarm" : "");
+}
+
+function redraw(card) { if (card.o) drawChart(card.cv, card.o); }
+const cards = {};
+function bindCard(name, o) { cards[name].o = o; }
+window.addEventListener("resize", () => { for (const n of Object.keys(cards)) redraw(cards[n]); });
+
+function ensureCards(names) {
+  const grid = $("grid");
+  if (Object.keys(cards).join("|") === names.join("|")) return;
+  grid.textContent = "";
+  for (const k of Object.keys(cards)) delete cards[k];
+  for (const n of names) {
+    cards[n] = makeCard(n);
+    attachHover(cards[n].cv, () => cards[n] && cards[n].o);
+    grid.appendChild(cards[n].card);
+  }
+}
+
+// ---------------------------------------------------------------- 실시간 모드
+function startLive() {
+  let rangeSec = 300, timer = null, tagTable = null;
+  const sel = el("select", { id: "range" }, [
+    el("option", { value: "60", text: "1분" }), el("option", { value: "300", text: "5분", selected: "" }),
+    el("option", { value: "1800", text: "30분" }), el("option", { value: "3600", text: "60분" })]);
+  sel.addEventListener("change", () => { rangeSec = +sel.value; tick(true); });
+  const stamp = el("span", { class: "meta", id: "stamp" });
+  $("controls").append(el("label", null, [el("span", { text: "표시 범위" }), sel]), stamp);
+
+  async function getJson(url) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(url + " " + res.status);
+    return res.json();
+  }
+  function banner(text) { const b = $("banner"); b.hidden = !text; b.textContent = text || ""; }
+
+  async function tick(now) {
+    clearTimeout(timer);
+    try {
+      const meta = await getJson("/api/meta");
+      $("title").textContent = "이상 점수 · " + meta.equipment_id;
+      $("meta").textContent = "상태 " + meta.state + " · 임계값 " + meta.threshold + " · 연속 " + meta.confirm_steps + "회";
+      ensureCards(meta.groups);
+      const data = await getJson("/api/scores?seconds=" + rangeSec + "&max_points=1200");
+      render(meta, data);
+      banner(meta.state !== "MONITORING" ? "정상 데이터를 모으는 중입니다(" + meta.state + "). 학습(train) 명령 뒤에 점수가 표시됩니다." : "");
+      stamp.textContent = "갱신 " + fmtClock(Date.now());
+    } catch (e) {
+      banner("앱과 연결되지 않았습니다. 다시 시도하는 중... (" + e.message + ")");
+    }
+    timer = setTimeout(tick, 2000);
+  }
+
+  function render(meta, data) {
+    const pts = data.points;
+    const gap = Math.max(3 * (data.bucket_ms || 0), 2000);
+    for (const name of meta.groups) {
+      const c = cards[name];
+      const xs = [], ys = [], alarms = [], tops = [];
+      for (const p of pts) {
+        const v = p.g[name];
+        xs.push(p.t); ys.push(v ? v[0] : null); alarms.push(v ? (v[1] ? 1 : 0) : 0); tops.push(v ? v[2] : "");
+      }
+      const xmax = data.now_ms || Date.now(), xmin = xmax - rangeSec * 1000;
+      const runs = [];
+      let start = -1;
+      for (let i = 0; i <= xs.length; i++) {
+        const cont = i < xs.length && alarms[i] && !(start >= 0 && xs[i] - xs[i - 1] > gap);
+        if (cont) { if (start < 0) start = i; continue; }
+        if (start >= 0) { runs.push([xs[start], xs[i - 1] + Math.max(data.bucket_ms || 0, 100)]); start = -1; }
+        if (i < xs.length && alarms[i]) start = i;
+      }
+      const ticks = timeTicks(xmin, xmax, Math.floor(c.cv.clientWidth / 100)).map((t) => ({ x: t, label: fmtClock(t) }));
+      const pick = xs.map((_, i) => i);
+      const last = xs.length - 1;
+      c.sub.textContent = last >= 0 && ys[last] !== null ? "현재 " + fmt(ys[last]) + " · 원인 " + tops[last] : "점수 없음";
+      setBadge(c, last >= 0 && alarms[last]);
+      bindCard(name, {
+        xmin, xmax, xs, ys, pick, threshold: meta.threshold, runs, bands: [], xTicks: ticks, hover: c.o ? c.o.hover : null,
+        breaks: (a, b) => xs[b] - xs[a] > gap,
+        tipText: (k) => fmtTime(xs[k]) + "\n점수 " + fmt(ys[k]) + (alarms[k] ? " (ALARM)" : "") + "\n원인 " + tops[k],
+      });
+      if (!pts.length) c.sub.textContent = meta.state === "MONITORING" ? "점수를 기다리는 중" : "점수 없음";
+      redraw(c);
+    }
+  }
+  tick(true);
+}
+
+// ---------------------------------------------------------------- 파일 모드
+function startFile(D) {
+  document.title = "이상 점수 · " + D.equipment_id;
+  $("title").textContent = "이상 점수 · " + D.equipment_id + " (저장된 점수)";
+  $("meta").textContent = "행 " + D.t.length + "개 · 구간 " + D.segments.length + "개";
+  ensureCards(D.groups);
+  const n = D.t.length;
+  const resetPrefix = new Array(n + 1).fill(0);
+  for (let i = 0; i < n; i++) resetPrefix[i + 1] = resetPrefix[i] + (D.reset[i] ? 1 : 0);
+  const thr = el("input", { type: "range", min: "0.5", max: "40", step: "0.1", value: String(D.threshold) });
+  const thrNum = el("input", { type: "number", min: "0.1", step: "0.1", value: String(D.threshold) });
+  const conf = el("input", { type: "number", min: "1", max: "100", step: "1", value: String(D.confirm) });
+  const summary = el("div", { class: "summary" });
+  const controls = $("controls");
+  controls.append(el("label", null, [el("span", { text: "임계값" }), thr, thrNum]),
+    el("label", null, [el("span", { text: "연속 확정 횟수" }), conf]));
+  if (D.recommended) {
+    const btn = el("button", { type: "button", text: "추천 " + D.recommended.value + " 적용 (연속 " + D.recommended.confirm + ")" });
+    btn.addEventListener("click", () => { conf.value = D.recommended.confirm; setThreshold(D.recommended.value); });
+    controls.append(btn);
+  }
+  controls.append(summary);
+
+  const pickCache = {};
+  for (const g of D.groups) pickCache[g] = null;
+  const bands = D.segments.map((s) => ({
+    x0: s.i0, x1: Math.max(s.i0 + 1, s.i1 - 1), kind: s.kind, label: s.name }));
+  const xTicks = D.segments.map((s) => ({ x: (s.i0 + s.i1 - 1) / 2, label: s.kind === "anomaly" ? "이상" : "정상" }));
+
+  function setThreshold(v) {
+    thr.value = v; thrNum.value = v; update();
+  }
+  function update() {
+    const T = parseFloat(thrNum.value), K = Math.max(1, parseInt(conf.value, 10) || 1);
+    if (!isFinite(T)) return;
+    const perGroup = {};
+    for (const g of D.groups) perGroup[g] = runAlarms(D.scores[g], D.reset, T, K);
+    const overall = orAlarms(D.groups.map((g) => perGroup[g]));
+    let normalAlarms = 0, normalSegs = 0, detected = 0, anomalyTotal = 0;
+    const missed = [];
+    for (const s of D.segments) {
+      const eps = countEpisodes(overall, D.reset, s.i0, s.i1);
+      if (s.kind === "anomaly") { anomalyTotal++; if (eps > 0) detected++; else missed.push(s.name); }
+      else { normalSegs++; normalAlarms += eps; }
+    }
+    summary.textContent = "임계값 " + T + ", 연속 " + K + "회 → 정상 구간 알람 " + normalAlarms + "건" +
+      (anomalyTotal ? " · 이상 구간 검출 " + detected + "/" + anomalyTotal + (missed.length ? " (놓침: " + missed.join(", ") + ")" : "")
+                    : " · 이상 구간 없음(민감도 미검증)");
+    for (const name of D.groups) {
+      const c = cards[name];
+      const ys = D.scores[name], alarms = perGroup[name];
+      const runs = [];
+      let start = -1;
+      for (let i = 0; i <= n; i++) {
+        const cont = i < n && alarms[i] && !(start >= 0 && D.reset[i]);
+        if (cont) { if (start < 0) start = i; continue; }
+        if (start >= 0) { runs.push([start, i - 1 + 0.5]); start = -1; }
+        if (i < n && alarms[i]) start = i;
+      }
+      let groupNormal = 0;
+      for (const s of D.segments) if (s.kind !== "anomaly") groupNormal += countEpisodes(alarms, D.reset, s.i0, s.i1);
+      const width = Math.max(200, c.cv.clientWidth);
+      if (!pickCache[name]) pickCache[name] = { w: 0, pick: [] };
+      if (pickCache[name].w !== width) pickCache[name] = { w: width, pick: pickMax(ys, Math.floor(width / 2)) };
+      c.sub.textContent = "정상 구간 알람 " + groupNormal + "건 (이 그룹만 기준)";
+      setBadge(c, false, groupNormal ? groupNormal + "건" : "0건");
+      bindCard(name, {
+        xmin: 0, xmax: Math.max(1, n - 1), xs: D.xIdx, ys, pick: pickCache[name].pick, threshold: T, runs, bands, xTicks,
+        hover: c.o ? c.o.hover : null,
+        breaks: (a, b) => resetPrefix[b + 1] - resetPrefix[a + 1] > 0,
+        tipText: (k) => fmtTime(D.t[k]) + "\n구간 " + segmentAt(k) + "\n점수 " + fmt(ys[k]) +
+          (alarms[k] ? " (ALARM)" : "") + "\n원인 " + (D.tagTable[D.tops[name][k]] || "-"),
+      });
+      redraw(c);
+    }
+  }
+  function segmentAt(k) {
+    for (const s of D.segments) if (k >= s.i0 && k < s.i1) return s.name;
+    return "";
+  }
+  D.xIdx = Array.from({ length: n }, (_, i) => i);
+  thr.addEventListener("input", () => { thrNum.value = thr.value; update(); });
+  thrNum.addEventListener("input", () => { if (isFinite(parseFloat(thrNum.value))) thr.value = thrNum.value; update(); });
+  conf.addEventListener("input", update);
+  window.addEventListener("resize", () => { for (const g of D.groups) pickCache[g] = null; update(); });
+  update();
+}
+
+if (BOOT && BOOT.mode === "file") startFile(BOOT);
+else startLive();
+</script>
+</body>
+</html>

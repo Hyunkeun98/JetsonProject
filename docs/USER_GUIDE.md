@@ -234,6 +234,25 @@ mosquitto_pub -h localhost -t "jetson/my_machine/cmd" -m '{"command": "recalibra
 - 정상 가동 중에 알람이 나면 그 시점의 점수와 `top_tag`를 기록해 두세요. 대기 중 알람이면 대기 기준이 너무 좁은 것일 수 있습니다.
 - 임계값은 **정상 데이터에서 알람이 거의 안 나는 값**에서 시작해, **실제 이상을 일부러 만들어서 잡히는지** 확인하며 정하는 것이 가장 정확합니다. NX5 데모에서는 기본값 3에서 정상인데도 오탐이 많았고, 같은 정상 데이터에서 10쯤이면 오탐이 없었습니다. 다만 이상 데이터로 잡히는지는 아직 확인하지 못했습니다.
 
+### 점수 그래프 보기
+
+**실시간(앱이 돌아가는 동안)**: 앱을 실행할 때 `--web-port`를 줍니다.
+```bash
+uv run jetson-app --config configs/my_machine.yaml --host localhost --web-port 8080
+```
+브라우저에서 `http://localhost:8080/`을 엽니다.
+- 그룹(공정/축)마다 칸이 하나씩 있고, 파란 선이 이상 점수, 빨간 점선이 임계값입니다. 알람이 확정된 구간은 붉게 칠해지고 `ALARM`이라고 표시됩니다.
+- 위의 "표시 범위"로 1분~60분을 고를 수 있고, 선에 마우스를 올리면 그 시각의 점수와 원인 태그가 보입니다.
+- 학습 전(`CALIBRATING`)에는 "정상 데이터를 모으는 중" 안내만 나옵니다.
+- 기본은 이 장비에서만 열립니다. 같은 네트워크의 다른 PC에서 보려면 `--web-host 0.0.0.0`을 추가하세요. 이때는 **로그인이 없어서 같은 네트워크의 누구나 볼 수 있습니다.**
+- 최근 1시간의 점수만 메모리에 보관합니다. 앱을 다시 시작하면 사라집니다.
+
+**저장해 둔 점수(서버 없이)**: 아래 "저장해 둔 파일로 평가하기"에서 만든 `scores.csv`를 그래프 한 장으로 만듭니다.
+```bash
+uv run jetson-plot --scores scores.csv --config configs/my_machine.yaml --out plot.html
+```
+`plot.html`을 더블클릭해서 엽니다. **임계값과 연속 횟수 슬라이더를 움직이면 알람 구간과 "정상 구간 알람 N건 / 이상 구간 검출 x/y"가 바로 다시 계산됩니다.** 설비를 돌리지 않고 임계값을 눈으로 고를 수 있습니다. 정상 구간은 초록, 이상 구간은 주황 배경으로 표시됩니다.
+
 ### 저장해 둔 파일로 평가하기 (임계값 추천)
 
 설비를 다시 돌리지 않고, 이미 저장해 둔 DX1 JSON 파일(`{"records":[...]}`가 한 줄씩 든 `.json`)로 학습·평가·임계값 추천을 할 수 있습니다. 브로커와 DX1 설정은 필요 없습니다.
@@ -290,7 +309,7 @@ mosquitto_pub -h localhost -t "jetson/my_machine/cmd" -m '{"command": "recalibra
 - **학습 중에는 앱이 멈춥니다.** 그 사이 들어온 데이터는 유실됩니다.
 - **임계값이 확정되지 않았습니다.** `jetson-threshold`가 추천값을 내 주지만, 실제 이상 데이터로 잡히는지 확인하는 작업이 남아 있습니다.
 - **어떤 태그를 점수로 볼지 자동으로 추천해 주지 않습니다.**
-- 점수와 알람을 받아서 **화면에 보여 주거나 설비에 연결하는 부분은 이 앱에 없습니다.**
+- 점수 그래프 화면은 있지만(5번의 "점수 그래프 보기") **로그인이 없고 읽기 전용**입니다. 알람을 **설비(PLC 등)에 연결하는 부분은 이 앱에 없습니다.** 그래프의 점수 이력은 앱을 다시 시작하면 사라집니다.
 
 ---
 
@@ -308,6 +327,10 @@ mosquitto_pub -h localhost -t "jetson/my_machine/cmd" -m '{"command": "recalibra
 uv run jetson-replay train --config C --data-dir D --segments S --model-dir M
 uv run jetson-replay score --config C --data-dir D --segments S --model-dir M --out scores.csv
 uv run jetson-threshold --scores scores.csv --config C
+
+# 점수 그래프: 실시간(앱 옵션) / 저장된 점수
+uv run jetson-app --config C --host localhost --web-port 8080
+uv run jetson-plot --scores scores.csv --config C --out plot.html
 
 # 결과 보기
 mosquitto_sub -h localhost -t "jetson/my_machine/anomaly" -v

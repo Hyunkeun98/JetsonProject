@@ -19,6 +19,7 @@ from .inference import ActiveModelHolder, InferenceEngine
 from .mqtt_subscriber import MqttRecordSubscriber, Record
 from .publisher import ResultPublisher
 from .resampler import EventTimeResampler
+from .score_history import HistoryRecordingPublisher, ScoreHistory
 from .snapshot_processor import SnapshotProcessor
 from .training import ModelArtifact, load_artifact, model_artifact_path, state_marker_path
 
@@ -33,6 +34,8 @@ class Pipeline:
     snapshotter: SnapshotProcessor
     mqtt_subscriber: MqttRecordSubscriber
     command_subscriber: CommandSubscriber
+    # 웹 화면용 점수 이력. build_pipeline(history_seconds=0)이면 None이다.
+    history: ScoreHistory | None = None
 
 
 def build_pipeline(
@@ -40,6 +43,7 @@ def build_pipeline(
     calibration_dir: str | Path,
     model_dir: str | Path,
     train_fn: TrainFn,
+    history_seconds: int = 0,
 ) -> Pipeline:
     resampler = EventTimeResampler(
         tags=config.tags,
@@ -135,12 +139,19 @@ def build_pipeline(
             print(f"[build_pipeline] 모델 로드 실패, CALIBRATING으로 폴백: {e}")
             calibration_manager.handle_recalibrate_command()
 
+    history = None
+    processor_publisher = result_publisher
+    if history_seconds > 0:
+        capacity = max(1, history_seconds * 1000 // config.resample_interval_ms)
+        history = ScoreHistory(capacity, tuple(group_specs))
+        processor_publisher = HistoryRecordingPublisher(result_publisher, history)
+
     snapshotter = SnapshotProcessor(
         sliding_window=sliding_window,
         calibration_manager=calibration_manager,
         inference_engine_holder=inference_engine_holder,
         debouncers=debouncers,
-        result_publisher=result_publisher,
+        result_publisher=processor_publisher,
     )
 
     command_subscriber = CommandSubscriber(config.command_topic, calibration_manager)
@@ -155,4 +166,5 @@ def build_pipeline(
         snapshotter=snapshotter,
         mqtt_subscriber=mqtt_subscriber,
         command_subscriber=command_subscriber,
+        history=history,
     )
