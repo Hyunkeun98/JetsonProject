@@ -258,3 +258,19 @@ groups:
 2. **DX1 쪽**: SpeeDBee의 MQTT Emitter 연결 상태/에러 로그, topic 오탈자를 확인한다.
 3. **네트워크**: DX1과 Jetson이 같은 서브넷에 있는지, Jetson 방화벽(1-4)이 막고 있지 않은지 확인한다.
 4. **인증 실패**: 브로커가 연결을 거부하면(`rc != 0`) 콘솔에 `MQTT 연결 실패 (rc=...)` 메시지가 출력된다 — 브로커 쪽 인증/ACL 설정(1-2)을 확인한다.
+
+## 저장해 둔 파일로 학습·점수·임계값 추천
+
+MQTT 브로커 없이, 수집해 둔 DX1 JSON 파일(한 줄이 `{"records":[...]}`인 `.json`/`.jsonl`)로 앱과 같은 부품(리샘플러, 윈도우, `InferenceEngine`, 학습 함수)을 돌린다. 운영 경로는 바뀌지 않는다. 단계별 설명은 [사용 안내서](../docs/USER_GUIDE.md)의 "저장해 둔 파일로 평가하기"를 본다. 설계는 `../docs/superpowers/specs/2026-10-07-replay-and-threshold-design.md`.
+
+```bash
+uv run jetson-replay train --config configs/nx5_servo.yaml --data-dir ../JSONData/run1 --segments segments.yaml --model-dir model_data
+uv run jetson-replay score --config configs/nx5_servo.yaml --data-dir ../JSONData/run1 --segments segments.yaml --model-dir model_data --out scores.csv
+uv run jetson-threshold --scores scores.csv --config configs/nx5_servo.yaml --confirm 3,5,10
+```
+
+- **구간 파일**: `train` / `normal_eval` / `anomaly`(이름 선택) 목록. 시각은 시간대가 필수(`2026-10-02T11:15:00+09:00`)이고 `[start, end)`이다. 서로 겹치면 오류다(학습과 검증이 겹치면 오탐이 적게 나와 임계값이 낮게 추천된다).
+- **재생 규칙**: 구간마다 리샘플러와 윈도우를 새로 시작한다. 데이터 폴더의 모든 `.json`/`.jsonl`을 읽고 토픽은 보지 않으며 설정의 태그만 쓴다. `train`은 모델과 함께 상태 마커를 `MONITORING`으로 써서 앱이 같은 `--model-dir`로 바로 이어 쓸 수 있다.
+- **점수 CSV**: 스텝마다 그룹별 점수/원인 태그와 윈도우 리셋 표시. 앱 처리기와 같은 점수를 낸다(테스트 및 run1 10,166행 일치 확인).
+- **임계값 계산**: 알람은 그룹마다 "점수 ≥ 임계값이 `confirm`번 연속", 전체는 OR이다. 길이 `confirm`인 창의 최솟값 중 최댓값(임계 점수 c)을 쓰면 임계값 T에서 알람이 나는 조건이 `T ≤ c`이다. 정상 구간의 c로 오탐 0건 최소값(T0), 이상 구간의 c로 모두 검출하는 최대값(T1)을 얻고, 후보 표는 앱의 디바운서로 시뮬레이션한다. 추천: 이상 없음 → `T0×1.2`(`--margin`, 또는 `--max-alarms-per-day N`), 이상 있음 → `T0 ≤ T1`이면 가운데, 아니면 추천 없음. 최소 추천값은 2.0, 이상 구간이 3개 미만이면 과적합 경고를 낸다.
+

@@ -234,6 +234,37 @@ mosquitto_pub -h localhost -t "jetson/my_machine/cmd" -m '{"command": "recalibra
 - 정상 가동 중에 알람이 나면 그 시점의 점수와 `top_tag`를 기록해 두세요. 대기 중 알람이면 대기 기준이 너무 좁은 것일 수 있습니다.
 - 임계값은 **정상 데이터에서 알람이 거의 안 나는 값**에서 시작해, **실제 이상을 일부러 만들어서 잡히는지** 확인하며 정하는 것이 가장 정확합니다. NX5 데모에서는 기본값 3에서 정상인데도 오탐이 많았고, 같은 정상 데이터에서 10쯤이면 오탐이 없었습니다. 다만 이상 데이터로 잡히는지는 아직 확인하지 못했습니다.
 
+### 저장해 둔 파일로 평가하기 (임계값 추천)
+
+설비를 다시 돌리지 않고, 이미 저장해 둔 DX1 JSON 파일(`{"records":[...]}`가 한 줄씩 든 `.json`)로 학습·평가·임계값 추천을 할 수 있습니다. 브로커와 DX1 설정은 필요 없습니다.
+
+1. **구간 파일 `segments.yaml`을 만듭니다.** 시각에는 시간대(`+09:00`)를 꼭 적습니다.
+   ```yaml
+   train:        # 정상 데이터. 이 구간으로 학습합니다
+     - {start: "2026-10-02T11:15:00+09:00", end: "2026-10-02T11:32:50+09:00"}
+   normal_eval:  # 학습에 쓰지 않은 정상 구간. 오탐을 재는 데 씁니다
+     - {start: "2026-10-02T12:11:00+09:00", end: "2026-10-02T12:40:00+09:00"}
+   anomaly:      # 이상을 일부러 만든 구간(있으면). 여러 개 가능합니다
+     - {name: servo_touch_1, start: "...", end: "..."}
+   ```
+   학습 구간과 검증/이상 구간은 겹치면 안 됩니다. 겹치면 오류가 납니다.
+2. **학습합니다.** 모델이 `--model-dir`에 저장되고, 앱이 같은 폴더로 바로 `MONITORING`을 시작할 수 있습니다.
+   ```bash
+   uv run jetson-replay train --config configs/my_machine.yaml --data-dir 데이터폴더 --segments segments.yaml --model-dir model_data
+   ```
+3. **점수를 냅니다.**
+   ```bash
+   uv run jetson-replay score --config configs/my_machine.yaml --data-dir 데이터폴더 --segments segments.yaml --model-dir model_data --out scores.csv
+   ```
+4. **임계값을 추천받습니다.** 점수 파일만 읽으므로 몇 번이든 바로 실행됩니다.
+   ```bash
+   uv run jetson-threshold --scores scores.csv --config configs/my_machine.yaml
+   ```
+   - 임계값별 정상 알람 수, 이상 검출 수, 검출까지 걸린 시간이 표로 나오고 추천값이 나옵니다.
+   - 이상 구간이 없으면 "정상에서 오탐이 0건인 최소값 × 1.2"를 추천하고 "민감도 미검증"이라고 알려 줍니다.
+   - 이상 구간이 있으면 "오탐 0건 최소값"과 "모든 이상을 잡는 최대값"의 가운데를 추천합니다. 둘이 겹치지 않으면 추천하지 않고 어느 이상을 놓치는지 보여 줍니다.
+   - 추천값은 제안입니다. 표를 보고 정해서 설정의 `alarm.threshold`에 적고 앱을 다시 시작하세요.
+
 ---
 
 ## 6. 문제가 생겼을 때
@@ -253,11 +284,11 @@ mosquitto_pub -h localhost -t "jetson/my_machine/cmd" -m '{"command": "recalibra
 
 - **Jetson 실기 검증을 아직 못 했습니다.** PC에서만 시험했습니다.
 - **GPU를 쓰지 않습니다.** CPU로 학습하고 추론합니다. Jetson에서 학습이 얼마나 걸리는지 아직 재 보지 못했습니다.
-- **수집해 둔 JSON 파일로 바로 학습하는 기능이 없습니다.** 앱은 MQTT로 들어오는 실시간 데이터만 학습에 씁니다. 파일로 학습하려면 파일을 MQTT로 다시 재생하는 도구가 필요한데, 시험용 임시 스크립트만 있고 정식 도구로는 만들지 않았습니다.
+- **수집해 둔 JSON 파일로 학습하는 도구(`jetson-replay`)는 있지만, 앱에 실시간으로 넣는 방식은 아닙니다.** 파일 학습은 5번의 "저장해 둔 파일로 평가하기"를 보세요. 실기(Jetson)에서의 시간은 재 보지 못했습니다.
 - **부팅할 때 앱이 자동으로 시작되지 않습니다.** 지금은 터미널에서 직접 실행합니다.
 - **지금 상태(CALIBRATING인지, 몇 스텝 모았는지)를 묻는 명령이 없습니다.** 앱 터미널의 하트비트 줄로만 알 수 있습니다.
 - **학습 중에는 앱이 멈춥니다.** 그 사이 들어온 데이터는 유실됩니다.
-- **임계값이 확정되지 않았습니다.** 실제 이상 데이터로 확인하는 작업이 남아 있습니다.
+- **임계값이 확정되지 않았습니다.** `jetson-threshold`가 추천값을 내 주지만, 실제 이상 데이터로 잡히는지 확인하는 작업이 남아 있습니다.
 - **어떤 태그를 점수로 볼지 자동으로 추천해 주지 않습니다.**
 - 점수와 알람을 받아서 **화면에 보여 주거나 설비에 연결하는 부분은 이 앱에 없습니다.**
 
@@ -272,6 +303,11 @@ uv run jetson-app --config configs/my_machine.yaml --host localhost
 # 학습 / 재학습 시작 (retain 금지)
 mosquitto_pub -h localhost -t "jetson/my_machine/cmd" -m '{"command": "train"}'
 mosquitto_pub -h localhost -t "jetson/my_machine/cmd" -m '{"command": "recalibrate"}'
+
+# 저장해 둔 파일로 학습/점수/임계값 추천
+uv run jetson-replay train --config C --data-dir D --segments S --model-dir M
+uv run jetson-replay score --config C --data-dir D --segments S --model-dir M --out scores.csv
+uv run jetson-threshold --scores scores.csv --config C
 
 # 결과 보기
 mosquitto_sub -h localhost -t "jetson/my_machine/anomaly" -v
