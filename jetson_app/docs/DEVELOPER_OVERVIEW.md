@@ -7,9 +7,10 @@
 DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설비 이상을 실시간으로 탐지**하는 프레임워크입니다.
 
 - 정상 데이터만으로 학습한 GRU가 **다음 시점의 값을 예측**하고, 실제 값과의 오차를 정상 오차 분포에 대한 z-점수로 바꿔 **이상 점수**로 씁니다.
+- 위치 신호의 순간 충격처럼 GRU가 못 잡는 이상은 **기준값 이탈 점수(`deviation`)** 가 맡습니다. 직전 2초의 중앙값에서 얼마나 벗어났는지를 대기 잡음 크기로 나눈 값이고, GRU 없이 단독으로도, GRU와 함께도 쓸 수 있습니다.
 - 점수가 임계값 이상으로 연속 N번 나오면 알람을 확정하고, 결과(점수/알람/원인 태그)를 MQTT로 다시 발행합니다.
 - 특정 설비에 묶여 있지 않고, 설정 YAML만 바꾸면 다른 DX1 설비에도 쓸 수 있게 만들었습니다.
-- 현재 데모 대상은 **NX5 데모 라인**입니다. 서보 3축(AxX, AxZ, AxCV)의 Pos/Vel/Trq만 이상 판단(점수)에 쓰고, ProcStart(공정 진행 여부)와 TaktTime은 입력으로만 씁니다.
+- 현재 데모 대상은 **NX5 데모 라인**입니다. GRU는 서보 3축(AxX, AxZ, AxCV)의 Pos/Vel/Trq를 점수에 쓰고 ProcStart(공정 진행 여부)와 TaktTime은 입력으로만 씁니다. 충격 감지는 3축 Pos에 `deviation`을 적용합니다(`configs/nx5_pos_deviation.yaml`).
 
 학습에는 이상 데이터를 쓰지 않습니다. 이상 데이터는 **임계값을 정하고 탐지 성능을 검증**하는 데만 씁니다.
 
@@ -24,8 +25,9 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
 | 저장한 파일로 학습/점수 (`jetson-replay`) | 구현 완료 |
 | 임계값 추천 (`jetson-threshold`) | 구현 완료 |
 | 점수 그래프 (실시간 웹 `--web-port`, 저장 파일 `jetson-plot`) | 구현 완료 |
-| 기준값 이탈 점수 `deviation` (위치 신호의 충격 감지, GRU와 별개) | 구현 완료, 앱·replay 연결, 테스트 통과 (미커밋 변경 포함) |
-| 후보 태그 추천 `jetson-deviation-suggest` | 구현 완료 |
+| 기준값 이탈 점수 `deviation` (위치 신호의 충격 감지, GRU와 별개) | 구현 완료, 앱·replay 연결, 테스트 통과, 푸시 완료 |
+| 후보 태그 추천 `jetson-deviation-suggest` | 구현 완료 (NX5에서 Pos 3개만 추천 확인) |
+| 태그 조합 선택 `jetson-select-tags`, 공정별 점수 `jetson-procscores` | 구현 완료 |
 | 실제 MQTT 연결로 `--web-port` 동작 확인 | **미확인** |
 | Jetson 실기에서 학습 시간 측정 | **미측정** (PC 기준: 19,350스텝 약 12.5분) |
 | 임계값 확정 | **진행 중** (아래 데이터 현황 참고) |
@@ -37,7 +39,7 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
 
 ## 3. 데이터 현황과 지금까지 알게 된 것
 
-수집 데이터는 저장소 밖의 `JSONData/`(git 미추적)에 있습니다.
+수집 데이터는 `JSONData/`에 있습니다. 이 중 **run3·run4의 원본 `DX_*.json`과 run4 `batches.txt`만 저장소에 올라가 있습니다**(약 72MB). 나머지(run1·run2, 실험 산출물, 모델)는 로컬에만 있습니다.
 
 - **run1** (2026-10-02): 장비 정상 구동 데이터. 기계 에러로 중지된 구간(batches.txt에 표시)은 학습에서 제외했습니다.
   - 서보 3축 모델로 정상 평가 구간에서 임계값 3, 연속 3번일 때 정상 알람이 67건 나왔고 대부분 **대기 구간(ProcStart=0)** 에서 났습니다.
@@ -46,12 +48,10 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
   - 정지 상태에서는 TaktTime이 전부 0이고 AxCV 위치도 달라서, run1로만 학습한 모델에는 완전히 처음 보는 입력입니다(점수가 94/61/294로 고정되어 비교 불가).
   - 정지 구간만으로 학습한 모델로 보면 X축(약함)과 CV축 접촉은 정상과 구분되고, Z축은 신호 자체에 변화가 없었습니다.
   - 실제 흔들림은 batches.txt의 START보다 3~7초 앞서 나타납니다. 라벨은 "손을 댄 순간" 기준으로 적어야 합니다.
-- **run3** (수집 중): 장비 구동 중 (1) 정상, (2) 대기 중인 축에 에러, (3) 동작 중인 축에 에러를 섞은 데이터입니다. 이 데이터로 임계값을 확정할 예정입니다.
-
 - **run3** (정상 10사이클)와 **run4** (7사이클, 대기 중인 축에 충격 9건):
   - 서보 속도·토크만 보는 GRU와 공정 단위 템플릿 비교는 충격을 한 건도 못 잡았습니다. 충격이 가장 뚜렷하게 나타나는 신호는 **Pos의 급한 이탈**이고, 속도·토크는 정상 변동에 묻힙니다.
   - 라벨(`batches.txt`)은 DX1 시각보다 약 6초 늦습니다(PC 시계 차이). 이를 모르고 라벨 구간만 비교해서 "신호가 없다"고 잘못 결론 낸 적이 있습니다. 평가 전에 원본 신호로 시각을 맞추세요.
-  - Pos 기준 `deviation`(run3로 학습, run4로 검증): 충격 9건 중 7건 검출, 정상 구간 알람 0건. 못 찾은 2건은 Pos에 흔적이 없습니다. 학습은 몇 초 걸립니다(GRU는 약 16분). 방식과 한계는 README의 "기준값 이탈 점수" 절.
+  - Pos 기준 `deviation`(run3로 학습, run4로 검증): 충격 9건 중 7건 검출, 정상 구간 알람 0건. 못 찾은 2건은 Pos에 흔적이 없습니다(충격이 약했던 것으로 보입니다). 한계: 너무 큰 충격은 "움직임"으로 취급되어 점수 0, 움직이는 구간은 점수 없음, 정상 10사이클뿐이라 기준 여유가 얇음. 학습은 몇 초 걸립니다(GRU는 약 16분). 방식과 한계는 README의 "기준값 이탈 점수" 절.
 
 **남은 핵심 결정:** 장비가 멈춰 있는 동안에도 서보를 감시할지 여부입니다. 감시한다면 정지 상태 정상 데이터를 따로 모아 학습해야 하고, 아니라면 정지 상태를 감시에서 제외해야 합니다.
 
@@ -68,6 +68,8 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
                                                   Debouncer(연속 N번) ──▶ ResultPublisher ──MQTT──▶ 외부
                                                                  └──▶ ScoreHistory ──▶ 웹 대시보드
 ```
+
+`deviation` 신호는 같은 스텝에서 GRU와 병렬로 계산되어 점수 발행에 합쳐집니다(`DeviationEngine`). 판정이 `settle_seconds`(기본 1초) 늦고, 움직이는 구간은 점수가 0입니다. 학습은 몇 초이며 결과는 `<설비>.deviation.json`로 저장됩니다.
 
 - 시간 기준은 수신 시각이 아니라 **레코드의 이벤트 시각(timestamp)** 입니다. 지연·순서 뒤바뀜은 `max_lateness_ms`까지 허용하고, 끊긴 구간은 윈도우를 리셋합니다.
 - 상태 태그(ProcStart)가 있는 그룹은 동작/대기 상태별로 따로 정상 오차 기준을 갖습니다.
@@ -133,6 +135,7 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 2. **학습에는 정상 데이터만 쓴다.** 이상 데이터는 검증용입니다.
 3. **구간은 시각으로 나눈다.** 정상/이상은 사이클이 아니라 시간 구간 단위이고, 구간 사이는 이어 붙이지 않습니다(윈도우 리셋).
 4. **점수 대상과 입력 전용 태그를 구분한다.** `groups`의 tags만 점수에 쓰고, `context_tags`와 그룹 밖 상태 태그는 입력으로만 씁니다.
+5. **정상 점수 기준은 학습 데이터에서 자동으로 정한다.** `deviation`의 잡음·움직임 기준·알람 기준은 사람이 숫자를 넣지 않고 정상 데이터로 정합니다(다른 설비에서 Claude 없이도 쓸 수 있어야 하기 때문). 새 설비는 `jetson-deviation-suggest`로 태그를 고릅니다.
 
 ## 7. 개발 방식
 
@@ -140,22 +143,24 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 - **테스트:** pytest. 새 기능에는 테스트를 같이 둡니다. 실행은 `uv run pytest`.
 - **환경:** Python 3.8, `uv`, torch<2.4(CPU), paho-mqtt<2. 패키지는 uv로 관리합니다.
 - **커밋:** 작은 단위로 `feat:`/`docs:`/`fix:`/`test:` 접두어를 씁니다. 기능 → 문서 → 푸시 순으로 갑니다.
-- **데이터 파일:** `JSONData/`, `DataList.xlsx`, 개인 실험 스크립트는 저장소에 올리지 않습니다.
-- **명령 요약:** `jetson-app`, `jetson-datalist`, `jetson-replay`, `jetson-threshold`, `jetson-plot`. 자세한 옵션은 `README.md`의 명령 레퍼런스를 보세요.
+- **데이터 파일:** run3·run4 원본을 제외한 `JSONData/`, `DataList.xlsx`, `models/`, 개인 실험 스크립트(`experiments/`, `Dorco_*.py`), 그림 파일은 저장소에 올리지 않습니다. 새 데이터를 올릴 때는 사용자 확인을 먼저 받으세요.
+- **명령 요약:** `jetson-app`, `jetson-datalist`, `jetson-replay`, `jetson-threshold`, `jetson-plot`, `jetson-deviation-suggest`, `jetson-select-tags`, `jetson-procscores`. 자세한 옵션은 `README.md`의 명령 레퍼런스를 보세요.
 
 ## 8. 앞으로 할 일 (우선순위 순)
 
-1. 더 많은 정상 사이클로 `deviation` 알람 기준 확정, 동작 중인 축에 가해진 이상 감지 방법 검토(지금은 움직이는 구간을 점수에서 뺍니다), 더 큰 충격이 "움직임"으로 취급되어 점수 0이 되는 한계 보완.
-2. 장비 정지 상태 처리 방침 결정과 반영(정지 상태 학습 또는 감시 제외).
-3. 서보 오탐이 몰린 대기 구간의 기준 폭(`_floor_std`) 점검.
-4. 실제 MQTT로 `--web-port` 동작 확인, 좁은 화면 레이아웃 확인.
-5. Jetson 실기에서 학습 시간 측정.
-6. replay/threshold/dashboard 독립 코드 리뷰.
-7. 자동 시작/상태 확인 명령, PLC/표시 연동.
+1. **(라벨 시각)** `batches.txt`는 DX1 시각보다 약 6초 늦으니 평가 때 맞춰 쓰고, 가능하면 라벨 기록 방식을 바로잡기.
+2. 더 많은 정상 사이클로 `deviation` 알람 기준 확정, 동작 중인 축에 가해진 이상 감지 방법 검토(지금은 움직이는 구간을 점수에서 뺍니다), 더 큰 충격이 "움직임"으로 취급되어 점수 0이 되는 한계 보완.
+3. 장비 정지 상태 처리 방침 결정과 반영(정지 상태 학습 또는 감시 제외).
+4. 서보 오탐이 몰린 대기 구간의 기준 폭(`_floor_std`) 점검.
+5. 실제 MQTT로 `--web-port` 동작 확인, 좁은 화면 레이아웃 확인.
+6. Jetson 실기에서 학습 시간 측정.
+7. replay/threshold/dashboard 독립 코드 리뷰.
+8. 자동 시작/상태 확인 명령, PLC/표시 연동.
 
 ## 9. 처음 시작하는 법
 
 1. `README.md`로 개요와 설정 형식을 읽습니다.
 2. `uv run pytest`로 환경이 맞는지 확인합니다.
 3. `USER_GUIDE.md`를 따라 `configs/nx5_servo.yaml`과 샘플 데이터로 replay → threshold → plot을 한 번 돌려 봅니다. 앱 전체 흐름이 한눈에 보입니다.
-4. 코드는 `pipeline.py`에서 시작해 `snapshot_processor.py`, `inference.py` 순으로 따라가면 실시간 흐름이 이해됩니다.
+4. 충격 감지(`deviation`)는 README의 "기준값 이탈 점수" 절을 읽고 `configs/nx5_pos_deviation.yaml`로 `JSONData/run3`(학습)·`run4`(검증)를 replay해 보면 7/9 검출을 재현할 수 있습니다.
+5. 코드는 `pipeline.py`에서 시작해 `snapshot_processor.py`, `inference.py` 순으로 따라가면 실시간 흐름이 이해됩니다.
