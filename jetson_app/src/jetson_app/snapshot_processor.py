@@ -34,12 +34,16 @@ class SnapshotProcessor:
         debouncers: dict[str, Debouncer] | None = None,
         result_publisher: ResultPublisher | None = None,
         max_queue_size: int = _DEFAULT_MAX_QUEUE_SIZE,
+        deviation_holder: ActiveModelHolder | None = None,
+        deviation_debouncers: dict[str, Debouncer] | None = None,
     ) -> None:
         self._sliding_window = sliding_window
         self._calibration_manager = calibration_manager
         self._inference_engine_holder = inference_engine_holder
         self._debouncers = debouncers
         self._result_publisher = result_publisher
+        self._deviation_holder = deviation_holder
+        self._deviation_debouncers = deviation_debouncers
         self._queue = queue.Queue(maxsize=max_queue_size)
         self._dropped = DropCounter("snapshot_processor: 처리가 밀려 폐기한 스냅샷")
         self._stop_event = threading.Event()
@@ -80,6 +84,7 @@ class SnapshotProcessor:
             self._sliding_window.clear()
             for debouncer in (self._debouncers or {}).values():
                 debouncer.reset()
+            self._reset_deviation()
         snapshot = step.snapshot
         timestamp = format_epoch_ns(step.epoch_ns)
 
@@ -95,31 +100,48 @@ class SnapshotProcessor:
                 f"캘리브레이션 상태={self._calibration_manager.state.value}"
             )
 
+    def _reset_deviation(self) -> None:
+        engine = self._deviation_holder.get() if self._deviation_holder is not None else None
+        if engine is not None:
+            engine.reset()
+        for debouncer in (self._deviation_debouncers or {}).values():
+            debouncer.reset()
+
     def _score_and_publish(self, timestamp: str, snapshot) -> None:
-        # 세 협력자는 함께 있어야만 채점이 성립한다. 하나라도 없는 상태로 진행하면
-        # 뒤쪽 update()/publish()에서 AttributeError가 나고, _process_safely의 포괄 예외
-        # 처리에 삼켜져 매 스텝 로그만 쏟아진다.
-        if (
-            self._inference_engine_holder is None
-            or self._debouncers is None
-            or self._result_publisher is None
-        ):
+        if self._result_publisher is None:
             return
         if self._calibration_manager.state != CalibrationState.MONITORING:
             return
-        if not self._sliding_window.is_full():
+        # (점수, 원인 태그, 알람) — GRU 그룹과 기준값 이탈 신호를 같은 형식으로 모은다.
+        outputs: dict[str, GroupOutput] = {}
+        outputs.update(self._gru_outputs(snapshot))
+        outputs.update(self._deviation_outputs(snapshot))
+        if not outputs:
             return
+        top_name = max(outputs, key=lambda name: outputs[name].score)
+        top = outputs[top_name]
+        alarm = any(output.alarm for output in outputs.values())
+        self._result_publisher.publish(timestamp, top.score, alarm, top.top_tag, outputs)
+
+    def _gru_outputs(self, snapshot) -> dict[str, GroupOutput]:
+        # 세 협력자는 함께 있어야만 GRU 채점이 성립한다. 하나라도 없는 상태로 진행하면
+        # 뒤쪽 update()에서 AttributeError가 나고, _process_safely의 포괄 예외
+        # 처리에 삼켜져 매 스텝 로그만 쏟아진다.
+        if self._inference_engine_holder is None or self._debouncers is None:
+            return {}
+        if not self._sliding_window.is_full():
+            return {}
         engine = self._inference_engine_holder.get()
         if engine is None:
-            return
+            return {}
         result = engine.score(self._sliding_window.to_list(), snapshot)
         if result is None:
-            return
+            return {}
         # 그룹 구성이 없는 결과(평면 설정)는 전체 점수를 단일 그룹 "all"로 본다.
         group_results = result.group_results or {
             "all": GroupResult(score=result.anomaly_score, top_tag=result.top_deviant_tag)
         }
-        outputs = {
+        return {
             name: GroupOutput(
                 score=group.score,
                 alarm=self._debouncers[name].update(group.score),
@@ -127,10 +149,24 @@ class SnapshotProcessor:
             )
             for name, group in group_results.items()
         }
-        alarm = any(output.alarm for output in outputs.values())
-        self._result_publisher.publish(
-            timestamp, result.anomaly_score, alarm, result.top_deviant_tag, outputs
-        )
+
+    def _deviation_outputs(self, snapshot) -> dict[str, GroupOutput]:
+        if self._deviation_holder is None or self._deviation_debouncers is None:
+            return {}
+        engine = self._deviation_holder.get()
+        if engine is None:
+            return {}
+        scores = engine.update(snapshot.values)
+        if not scores:
+            return {}
+        return {
+            name: GroupOutput(
+                score=score.score,
+                alarm=self._deviation_debouncers[name].update(score.score),
+                top_tag=score.top_tag,
+            )
+            for name, score in scores.items()
+        }
 
     def _process_safely(self, step: ResampledStep) -> None:
         try:

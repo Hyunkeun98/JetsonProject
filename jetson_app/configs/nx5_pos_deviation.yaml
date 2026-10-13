@@ -1,0 +1,20 @@
+# NX5 데모 라인: 서보 3축의 위치(Pos)만 "기준값 이탈"로 본다(GRU 없음).
+# 멈춰 있는 축을 외력으로 건드리면 Pos가 잠깐 급하게 벗어나는 것을 잡는다. 잡음 크기, 움직임 기준,
+# 알람 기준은 정상 데이터로 학습할 때 자동으로 정해진다(숫자를 직접 정할 필요 없음).
+equipment_id: nx5
+mqtt:
+  subscribe_topics:
+  - dx1/AxisData
+  publish_topic: jetson/nx5/anomaly
+  command_topic: jetson/nx5/cmd
+deviation:
+  signals:
+    axis_x: NX5_AxisData:AxX_Act_Pos
+    axis_z: NX5_AxisData:AxZ_Act_Pos
+    axis_cv: NX5_AxisData:AxCV_Act_Pos
+resample_interval_ms: 100
+max_lateness_ms: 500
+window_size: 30
+calibration:
+  max_duration: 7d
+  min_samples: 3000

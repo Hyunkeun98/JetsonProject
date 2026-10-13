@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .timeparse import format_epoch_ns
 
 _FIXED_COLUMNS = ("epoch_ns", "time", "kind", "segment", "reset")
+_TAG_Z_PREFIX = "z:"
 
 
 class ScoresError(ValueError):
@@ -23,12 +24,20 @@ class ScoreRow:
     segment: str
     reset: bool
     groups: dict
+    # 태그 -> 태그별 점수(z). 점수에서 뺀 태그도 포함한다. 없으면 빈 dict.
+    tag_z: dict = field(default_factory=dict)
 
 
 def write_scores_csv(path: str | Path, rows: list[ScoreRow], group_names: tuple[str, ...]) -> None:
     header = list(_FIXED_COLUMNS)
     for name in group_names:
         header += [f"{name}_score", f"{name}_top"]
+    tag_names: list[str] = []
+    for row in rows:
+        for tag in row.tag_z:
+            if tag not in tag_names:
+                tag_names.append(tag)
+    header += [_TAG_Z_PREFIX + tag for tag in tag_names]
     with Path(path).open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(header)
@@ -40,6 +49,8 @@ def write_scores_csv(path: str | Path, rows: list[ScoreRow], group_names: tuple[
                     line += [repr(float(score)), top]
                 else:
                     line += ["", ""]
+            for tag in tag_names:
+                line.append(repr(float(row.tag_z[tag])) if tag in row.tag_z else "")
             writer.writerow(line)
 
 
@@ -53,7 +64,11 @@ def read_scores_csv(path: str | Path) -> tuple[list[ScoreRow], tuple[str, ...]]:
         header = next(reader, None)
         if header is None or tuple(header[: len(_FIXED_COLUMNS)]) != _FIXED_COLUMNS:
             raise ScoresError("점수 파일의 머리글이 jetson-replay score가 만든 형식이 아닙니다")
-        group_columns = header[len(_FIXED_COLUMNS) :]
+        rest = header[len(_FIXED_COLUMNS) :]
+        z_start = next((i for i, c in enumerate(rest) if c.startswith(_TAG_Z_PREFIX)), len(rest))
+        group_columns = rest[:z_start]
+        z_tags = [c[len(_TAG_Z_PREFIX) :] for c in rest[z_start:]]
+        z_offset = len(_FIXED_COLUMNS) + z_start
         if not group_columns or len(group_columns) % 2 or not all(
             group_columns[i].endswith("_score") and group_columns[i + 1].endswith("_top")
             for i in range(0, len(group_columns), 2)
@@ -68,6 +83,9 @@ def read_scores_csv(path: str | Path) -> tuple[list[ScoreRow], tuple[str, ...]]:
                     score_text = line[len(_FIXED_COLUMNS) + 2 * index]
                     if score_text != "":
                         groups[name] = (float(score_text), line[len(_FIXED_COLUMNS) + 2 * index + 1])
+                tag_z = {
+                    tag: float(line[z_offset + i]) for i, tag in enumerate(z_tags) if line[z_offset + i] != ""
+                }
                 rows.append(
                     ScoreRow(
                         epoch_ns=int(line[0]),
@@ -75,6 +93,7 @@ def read_scores_csv(path: str | Path) -> tuple[list[ScoreRow], tuple[str, ...]]:
                         segment=line[3],
                         reset=line[4] == "1",
                         groups=groups,
+                        tag_z=tag_z,
                     )
                 )
             except (ValueError, IndexError) as e:

@@ -23,6 +23,9 @@ jetson-datalist = "jetson_app.datalist_to_config:main"
 jetson-replay = "jetson_app.replay_cli:main"
 jetson-threshold = "jetson_app.threshold_cli:main"
 jetson-plot = "jetson_app.plot_cli:main"
+jetson-select-tags = "jetson_app.tag_select_cli:main"
+jetson-procscores = "jetson_app.process_scores_cli:main"
+jetson-deviation-suggest = "jetson_app.deviation_suggest_cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.21,<0.12.0"]

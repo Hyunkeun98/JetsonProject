@@ -68,6 +68,33 @@ class TrainingConfig:
     epochs: int = DEFAULT_EPOCHS
 
 
+DEFAULT_DEVIATION_BASELINE_SECONDS = 2.0
+DEFAULT_DEVIATION_SETTLE_SECONDS = 1.0
+DEFAULT_DEVIATION_MARGIN = 1.2
+DEFAULT_DEVIATION_CONFIRM_STEPS = 1
+
+
+@dataclass(frozen=True)
+class DeviationSignalConfig:
+    """기준값 이탈로 점수를 낼 신호 하나. name은 점수/알람의 그룹 이름이 된다.
+    move_range가 None이면 학습 데이터에서 자동으로 정한다."""
+
+    name: str
+    tag: str
+    move_range: float | None = None
+
+
+@dataclass(frozen=True)
+class DeviationConfig:
+    """신호가 직전 기준값에서 얼마나 벗어났는지로 점수를 내는 방식(GRU와 별개)의 설정."""
+
+    signals: tuple[DeviationSignalConfig, ...]
+    baseline_seconds: float = DEFAULT_DEVIATION_BASELINE_SECONDS
+    settle_seconds: float = DEFAULT_DEVIATION_SETTLE_SECONDS
+    margin: float = DEFAULT_DEVIATION_MARGIN
+    confirm_steps: int = DEFAULT_DEVIATION_CONFIRM_STEPS
+
+
 @dataclass(frozen=True)
 class EquipmentConfig:
     equipment_id: str
@@ -85,11 +112,24 @@ class EquipmentConfig:
     # 모델 입력으로만 쓰고 점수에는 반영하지 않는 태그. `tags`는 점수 태그, 점수 밖 상태 태그,
     # 이 태그를 모두 합한 모델 입력 태그다(학습/MQTT 필터/모델 호환성 검사가 이 값을 쓴다).
     context_tags: tuple[str, ...] = ()
+    # 모델 입력과 학습에는 그대로 두고, 점수(그룹 최댓값)에서만 뺄 그룹 태그. 모델을 다시 학습할 필요가 없다.
+    score_exclude_tags: tuple[str, ...] = ()
+    # GRU와 별개로 신호의 기준값 이탈로 점수를 내는 설정. 없으면 None.
+    deviation: DeviationConfig | None = None
+
+    @property
+    def all_tags(self) -> tuple[str, ...]:
+        """구독/리샘플링할 태그 전체: GRU 입력 태그(tags)와 기준값 이탈 신호의 태그."""
+        extra = tuple(s.tag for s in self.deviation.signals) if self.deviation else ()
+        return self.tags + tuple(t for t in extra if t not in self.tags)
 
     def resolved_groups(self) -> tuple[GroupConfig, ...]:
-        """groups가 있으면 그대로, 평면 tags 설정이면 상태 태그 없는 단일 그룹 'all'."""
+        """groups가 있으면 그대로, 평면 tags 설정이면 상태 태그 없는 단일 그룹 'all'.
+        GRU를 쓰지 않는 설정(기준값 이탈만)이면 빈 튜플."""
         if self.groups:
             return self.groups
+        if not self.tags:
+            return ()
         return (GroupConfig(name="all", state_tag=None, tags=self.tags),)
 
     def group_specs(self) -> dict[str, tuple[str | None, tuple[str, ...]]]:
@@ -145,6 +185,21 @@ def _parse_context_tags(raw: object, groups: tuple[GroupConfig, ...]) -> tuple[s
     return tuple(raw)
 
 
+def _parse_score_exclude_tags(raw: object, groups: tuple[GroupConfig, ...]) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not raw or not all(isinstance(t, str) and t for t in raw):
+        raise ConfigError("score_exclude_tags must be a non-empty list of tag names")
+    if len(set(raw)) != len(raw):
+        raise ConfigError("score_exclude_tags: a tag is listed more than once")
+    scored = {tag for g in groups for tag in g.tags}
+    for tag in raw:
+        if tag not in scored:
+            raise ConfigError(f"score_exclude_tags: tag '{tag}' is not a scored tag of any group")
+    for g in groups:
+        if all(tag in raw for tag in g.tags):
+            raise ConfigError(f"score_exclude_tags: group '{g.name}' would have no scored tag left")
+    return tuple(raw)
+
+
 def _model_input_tags(groups: tuple[GroupConfig, ...], context_tags: tuple[str, ...]) -> tuple[str, ...]:
     """점수 태그(그룹 순서), 점수 밖 상태 태그, 입력 전용 태그 순서로 중복 없이 합친다."""
     ordered: list[str] = []
@@ -157,6 +212,60 @@ def _model_input_tags(groups: tuple[GroupConfig, ...], context_tags: tuple[str, 
             if tag not in ordered:
                 ordered.append(tag)
     return tuple(ordered)
+
+
+_DEVIATION_OPTIONS = {"baseline_seconds", "settle_seconds", "margin", "confirm_steps", "signals"}
+
+
+def _positive_number(value: object, label: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        raise ConfigError(f"{label} must be a positive number")
+    return float(value)
+
+
+def _parse_deviation(raw: object, taken_names: set[str]) -> DeviationConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError("deviation section must be a mapping")
+    unknown = set(raw) - _DEVIATION_OPTIONS
+    if unknown:
+        raise ConfigError(f"deviation: unknown option {sorted(unknown)}")
+    if "signals" not in raw:
+        raise ConfigError("deviation: missing required field: signals")
+    raw_signals = raw["signals"]
+    if not isinstance(raw_signals, dict) or not raw_signals:
+        raise ConfigError("deviation.signals must be a non-empty mapping (name -> tag)")
+    signals: list[DeviationSignalConfig] = []
+    seen_tags: set[str] = set()
+    for name, body in raw_signals.items():
+        name = str(name)
+        if name in taken_names:
+            raise ConfigError(f"deviation signal '{name}' has the same name as a group already defined")
+        move_range = None
+        if isinstance(body, dict):
+            tag = body.get("tag")
+            if "move_range" in body:
+                move_range = _positive_number(body["move_range"], f"deviation signal '{name}': move_range")
+        else:
+            tag = body
+        if not isinstance(tag, str) or not tag:
+            raise ConfigError(f"deviation signal '{name}': tag must be a non-empty string")
+        if tag in seen_tags:
+            raise ConfigError(f"deviation: tag '{tag}' is listed more than once")
+        seen_tags.add(tag)
+        signals.append(DeviationSignalConfig(name=name, tag=tag, move_range=move_range))
+    return DeviationConfig(
+        signals=tuple(signals),
+        baseline_seconds=_positive_number(
+            raw.get("baseline_seconds", DEFAULT_DEVIATION_BASELINE_SECONDS), "deviation.baseline_seconds"
+        ),
+        settle_seconds=_positive_number(
+            raw.get("settle_seconds", DEFAULT_DEVIATION_SETTLE_SECONDS), "deviation.settle_seconds"
+        ),
+        margin=_positive_number(raw.get("margin", DEFAULT_DEVIATION_MARGIN), "deviation.margin"),
+        confirm_steps=_positive_int(
+            raw.get("confirm_steps", DEFAULT_DEVIATION_CONFIRM_STEPS), "deviation.confirm_steps"
+        ),
+    )
 
 
 def _parse_alarm(raw: object) -> AlarmConfig:
@@ -209,22 +318,33 @@ def load_equipment_config(path: str | Path) -> EquipmentConfig:
 
     if "tags" in data and "groups" in data:
         raise ConfigError("use either 'tags' or 'groups', not both")
-    if "tags" not in data and "groups" not in data:
-        raise ConfigError("missing required field: tags (or groups)")
+    if "tags" not in data and "groups" not in data and "deviation" not in data:
+        raise ConfigError("missing required field: tags (or groups, or deviation)")
     if "context_tags" in data and "groups" not in data:
         raise ConfigError("context_tags can only be used together with 'groups'")
+    if "score_exclude_tags" in data and "groups" not in data:
+        raise ConfigError("score_exclude_tags can only be used together with 'groups'")
+    score_exclude_tags: tuple[str, ...] = ()
     if "groups" in data:
         groups = _parse_groups(data["groups"])
+        if "score_exclude_tags" in data:
+            score_exclude_tags = _parse_score_exclude_tags(data["score_exclude_tags"], groups)
         context_tags = (
             _parse_context_tags(data["context_tags"], groups) if "context_tags" in data else ()
         )
         tags = _model_input_tags(groups, context_tags)
-    else:
+    elif "tags" in data:
         groups = ()
         context_tags = ()
         tags = data["tags"]
         if not isinstance(tags, list) or not tags:
             raise ConfigError("tags must be a non-empty list")
+    else:  # 기준값 이탈(deviation)만 쓰는 설정: GRU 입력 태그가 없다
+        groups = ()
+        context_tags = ()
+        tags = ()
+    taken_names = {g.name for g in groups} or ({"all"} if tags else set())
+    deviation = _parse_deviation(data["deviation"], taken_names) if "deviation" in data else None
 
     resample_interval_ms = data["resample_interval_ms"]
     if not isinstance(resample_interval_ms, int) or isinstance(resample_interval_ms, bool) or resample_interval_ms <= 0:
@@ -269,4 +389,6 @@ def load_equipment_config(path: str | Path) -> EquipmentConfig:
         alarm=alarm,
         training=training,
         context_tags=context_tags,
+        score_exclude_tags=score_exclude_tags,
+        deviation=deviation,
     )

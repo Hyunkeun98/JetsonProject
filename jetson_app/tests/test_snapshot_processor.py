@@ -406,3 +406,111 @@ def test_reset_window_resets_every_group_debouncer():
     processor.process(_step(10, 7.0, reset_window=True))
 
     assert (first.reset_calls, second.reset_calls) == (1, 1)
+
+
+# --- 기준값 이탈(deviation) 점수 ---------------------------------------------------------
+
+from jetson_app.deviation import DeviationScore  # noqa: E402
+from jetson_app.inference import GroupResult  # noqa: E402
+
+
+class _FakeDeviationEngine:
+    def __init__(self, result):
+        self._result = result
+        self.calls = []
+        self.reset_calls = 0
+
+    def update(self, values):
+        self.calls.append(values)
+        return self._result
+
+    def reset(self):
+        self.reset_calls += 1
+
+
+def _dev_processor(window, manager, dev_engine, dev_debouncers, publisher, engine=None, debouncers=None):
+    return SnapshotProcessor(
+        sliding_window=window,
+        calibration_manager=manager,
+        inference_engine_holder=_FakeHolder(engine) if engine is not None else None,
+        debouncers=debouncers,
+        result_publisher=publisher,
+        deviation_holder=_FakeHolder(dev_engine),
+        deviation_debouncers=dev_debouncers,
+    )
+
+
+def test_deviation_scores_are_published_without_a_gru_model_and_before_the_window_is_full():
+    manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    dev_engine = _FakeDeviationEngine({"x_pos": DeviationScore(score=4.0, top_tag="pos", z=9.0)})
+    debouncer = _FakeDebouncer(alarm=True)
+    publisher = _FakePublisher()
+    processor = _dev_processor(SlidingWindow(5), manager, dev_engine, {"x_pos": debouncer}, publisher)
+
+    step = _step(1, 3.0)
+    processor.process(step)
+
+    assert dev_engine.calls == [step.snapshot.values]
+    assert debouncer.scores == [4.0]
+    timestamp, score, alarm, top, groups = publisher.published[0]
+    assert (timestamp, score, alarm, top) == (format_epoch_ns(step.epoch_ns), 4.0, True, "pos")
+    assert groups["x_pos"].score == 4.0 and groups["x_pos"].alarm is True and groups["x_pos"].top_tag == "pos"
+
+
+def test_gru_and_deviation_groups_are_merged_and_overall_score_is_the_largest():
+    window = _filled_window(2, 2)
+    manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    engine = _FakeEngine(
+        AnomalyResult(
+            anomaly_score=1.0,
+            top_deviant_tag="a",
+            group_results={"axis_x": GroupResult(score=1.0, top_tag="a")},
+        )
+    )
+    dev_engine = _FakeDeviationEngine({"x_pos": DeviationScore(score=4.0, top_tag="pos", z=9.0)})
+    publisher = _FakePublisher()
+    processor = _dev_processor(
+        window, manager, dev_engine, {"x_pos": _FakeDebouncer(True)}, publisher,
+        engine=engine, debouncers={"axis_x": _FakeDebouncer(False)},
+    )
+
+    processor.process(_step(2, 99.0))
+
+    _ts, score, alarm, top, groups = publisher.published[0]
+    assert (score, alarm, top) == (4.0, True, "pos")
+    assert set(groups) == {"axis_x", "x_pos"}
+    assert groups["axis_x"].alarm is False and groups["x_pos"].alarm is True
+
+
+def test_deviation_is_not_scored_when_calibrating():
+    manager = _FakeCalibrationManager(CalibrationState.CALIBRATING)
+    dev_engine = _FakeDeviationEngine({"x_pos": DeviationScore(score=4.0, top_tag="pos", z=9.0)})
+    publisher = _FakePublisher()
+    processor = _dev_processor(SlidingWindow(5), manager, dev_engine, {"x_pos": _FakeDebouncer(True)}, publisher)
+
+    processor.process(_step(1, 3.0))
+
+    assert dev_engine.calls == [] and publisher.published == []
+
+
+def test_nothing_is_published_when_neither_engine_has_a_score():
+    manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    publisher = _FakePublisher()
+    processor = _dev_processor(
+        SlidingWindow(5), manager, _FakeDeviationEngine(None), {"x_pos": _FakeDebouncer(True)}, publisher
+    )
+
+    processor.process(_step(1, 3.0))
+
+    assert publisher.published == []
+
+
+def test_reset_window_also_resets_the_deviation_engine_and_debouncers():
+    manager = _FakeCalibrationManager(CalibrationState.MONITORING)
+    dev_engine = _FakeDeviationEngine(None)
+    dev_debouncer = _FakeDebouncer(False)
+    processor = _dev_processor(SlidingWindow(5), manager, dev_engine, {"x_pos": dev_debouncer}, _FakePublisher())
+
+    processor.process(_step(10, 7.0, reset_window=True))
+
+    assert dev_engine.reset_calls == 1 and dev_debouncer.reset_calls == 1

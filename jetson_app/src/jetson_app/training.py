@@ -7,7 +7,8 @@ import torch
 from torch import nn
 
 from .calibration import CalibrationSample, TrainFn
-from .config import DEFAULT_EPOCHS, DEFAULT_MAX_TRAINING_SAMPLES
+from .config import DEFAULT_EPOCHS, DEFAULT_MAX_TRAINING_SAMPLES, EquipmentConfig
+from .deviation import deviation_artifact_path, make_deviation_train_fn
 from .model import AnomalyGRU
 from .tag_stats import compute_normalization_stats, detect_tag_types, type_indices
 from .windowing import build_windows
@@ -327,6 +328,36 @@ def make_train_fn(
             max_training_samples=max_training_samples,
         )
         save_artifact(model_path, artifact)
+
+    return _train_fn
+
+
+def make_equipment_train_fn(config: EquipmentConfig, model_dir: str | Path, **gru_options) -> TrainFn:
+    """설정에 맞는 학습을 모두 하는 학습 함수: GRU 입력 태그가 있으면 GRU를, deviation 섹션이 있으면
+    기준값 이탈 기준을 학습한다. gru_options는 make_train_fn에 그대로 넘긴다(테스트/도구용)."""
+    fns: list[TrainFn] = []
+    if config.tags:
+        options = {
+            "epochs": config.training.epochs,
+            "max_training_samples": config.training.max_samples,
+            **gru_options,
+        }
+        fns.append(
+            make_train_fn(
+                tags=config.tags,
+                window_size=config.window_size,
+                model_path=model_artifact_path(model_dir, config.equipment_id),
+                resample_interval_ms=config.resample_interval_ms,
+                groups=config.group_specs(),
+                **options,
+            )
+        )
+    if config.deviation is not None:
+        fns.append(make_deviation_train_fn(config, deviation_artifact_path(model_dir, config.equipment_id)))
+
+    def _train_fn(samples: list[CalibrationSample]) -> None:
+        for fn in fns:
+            fn(samples)
 
     return _train_fn
 

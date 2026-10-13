@@ -5,6 +5,12 @@ from pathlib import Path
 from .buffer import SlidingWindow
 from .calibration import CalibrationSample, CalibrationState, StateStore
 from .config import EquipmentConfig
+from .deviation import (
+    DeviationEngine,
+    check_deviation_artifact,
+    deviation_artifact_path,
+    load_deviation_artifact,
+)
 from .inference import InferenceEngine
 from .mqtt_subscriber import Record, parse_and_filter_records
 from .resampler import EventTimeResampler, ResampledStep
@@ -14,7 +20,7 @@ from .timeparse import format_epoch_ns
 from .training import (
     ModelArtifact,
     load_artifact,
-    make_train_fn,
+    make_equipment_train_fn,
     model_artifact_path,
     state_marker_path,
 )
@@ -55,7 +61,7 @@ def steps_for_segment(
 ) -> list[ResampledStep]:
     """구간 하나를 새 리샘플러에 통과시켜 확정된 스텝을 얻는다(구간 사이는 이어 붙이지 않는다)."""
     resampler = EventTimeResampler(
-        tags=config.tags,
+        tags=config.all_tags,
         interval_ms=config.resample_interval_ms,
         max_lateness_ms=config.max_lateness_ms,
         window_size=config.window_size,
@@ -77,7 +83,7 @@ def train_from_files(
     앱이 같은 --model-dir로 바로 이어 쓰도록 상태 마커도 MONITORING으로 쓴다."""
     if not segment_set.train:
         raise ReplayError("구간 파일에 train 구간이 없습니다")
-    records = load_records(data_dir, config.tags, segment_set.train)
+    records = load_records(data_dir, config.all_tags, segment_set.train)
     samples: list[CalibrationSample] = []
     for segment in segment_set.train:
         for step in steps_for_segment(config, records, segment):
@@ -88,17 +94,13 @@ def train_from_files(
             )
     if not samples:
         raise ReplayError("학습 구간에서 만들어진 스텝이 없습니다. 구간 시각과 데이터 파일을 확인하세요")
-    model_path = model_artifact_path(model_dir, config.equipment_id)
+    model_path = (
+        model_artifact_path(model_dir, config.equipment_id)
+        if config.tags
+        else deviation_artifact_path(model_dir, config.equipment_id)
+    )
     model_path.parent.mkdir(parents=True, exist_ok=True)
-    make_train_fn(
-        tags=config.tags,
-        window_size=config.window_size,
-        model_path=model_path,
-        resample_interval_ms=config.resample_interval_ms,
-        groups=config.group_specs(),
-        epochs=config.training.epochs,
-        max_training_samples=config.training.max_samples,
-    )(samples)
+    make_equipment_train_fn(config, model_dir)(samples)
     StateStore(state_marker_path(model_dir, config.equipment_id)).write(CalibrationState.MONITORING)
     return model_path, len(samples)
 
@@ -120,13 +122,27 @@ def load_matching_artifact(config: EquipmentConfig, model_dir: str | Path) -> Mo
     return artifact
 
 
+def load_matching_deviation_artifact(config: EquipmentConfig, model_dir: str | Path):
+    path = deviation_artifact_path(model_dir, config.equipment_id)
+    if not path.exists():
+        raise ReplayError(f"기준값 이탈 학습 결과가 없습니다: {path} (먼저 jetson-replay train을 실행하세요)")
+    artifact = load_deviation_artifact(path)
+    try:
+        check_deviation_artifact(artifact, config)
+    except ValueError as e:
+        raise ReplayError(f"{e}. 설정을 바꿨다면 다시 학습하세요") from e
+    return artifact
+
+
 def score_steps(
-    engine: InferenceEngine,
+    engine: InferenceEngine | None,
     steps: list[ResampledStep],
     window_size: int,
     segment: Segment,
+    deviation_engine: DeviationEngine | None = None,
 ) -> list[ScoreRow]:
-    """앱 처리기와 같은 순서(윈도우로 예측 → 점수 → 스냅샷 push)로 스텝마다 점수를 낸다."""
+    """앱 처리기와 같은 순서(윈도우로 예측 → 점수 → 스냅샷 push)로 스텝마다 점수를 낸다.
+    기준값 이탈 점수는 settle 시간만큼 늦게 나온다(앱과 같다): 행의 시각은 점수가 나온 스텝의 시각이다."""
     window = SlidingWindow(window_size)
     rows: list[ScoreRow] = []
     pending_reset = True  # 구간의 첫 점수는 새 윈도우에서 시작한다
@@ -134,23 +150,35 @@ def score_steps(
         if step.reset_window:
             window.clear()
             pending_reset = True
-        if window.is_full():
+            if deviation_engine is not None:
+                deviation_engine.reset()
+        groups: dict = {}
+        tag_z: dict = {}
+        if engine is not None and window.is_full():
             result = engine.score(window.to_list(), step.snapshot)
             if result is not None:
-                groups = {
-                    name: (group.score, group.top_tag)
-                    for name, group in (result.group_results or {}).items()
-                }
-                rows.append(
-                    ScoreRow(
-                        epoch_ns=step.epoch_ns,
-                        kind=segment.kind,
-                        segment=segment.name,
-                        reset=pending_reset,
-                        groups=groups,
-                    )
+                groups.update(
+                    {
+                        name: (group.score, group.top_tag)
+                        for name, group in (result.group_results or {}).items()
+                    }
                 )
-                pending_reset = False
+                tag_z = dict(result.tag_z)
+        if deviation_engine is not None:
+            for name, score in (deviation_engine.update(step.snapshot.values) or {}).items():
+                groups[name] = (score.score, score.top_tag)
+        if groups:
+            rows.append(
+                ScoreRow(
+                    epoch_ns=step.epoch_ns,
+                    kind=segment.kind,
+                    segment=segment.name,
+                    reset=pending_reset,
+                    groups=groups,
+                    tag_z=tag_z,
+                )
+            )
+            pending_reset = False
         window.push(step.snapshot)
     return rows
 
@@ -164,18 +192,27 @@ def score_from_files(
     eval_segments = segment_set.eval_segments()
     if not eval_segments:
         raise ReplayError("구간 파일에 normal_eval 또는 anomaly 구간이 없습니다")
-    artifact = load_matching_artifact(config, model_dir)
-    engine = InferenceEngine(artifact)
-    records = load_records(data_dir, config.tags, eval_segments)
+    artifact = load_matching_artifact(config, model_dir) if config.tags else None
+    engine = InferenceEngine(artifact, config.score_exclude_tags) if artifact is not None else None
+    deviation_artifact = load_matching_deviation_artifact(config, model_dir) if config.deviation else None
+    records = load_records(data_dir, config.all_tags, eval_segments)
     rows: list[ScoreRow] = []
     for segment in eval_segments:
         steps = steps_for_segment(config, records, segment)
-        segment_rows = score_steps(engine, steps, config.window_size, segment)
+        # 구간마다 새 엔진: 구간 사이를 이어 붙이지 않는다(GRU 윈도우를 구간마다 새로 쌓는 것과 같다).
+        deviation_engine = (
+            DeviationEngine(deviation_artifact, config.alarm.threshold) if deviation_artifact else None
+        )
+        segment_rows = score_steps(engine, steps, config.window_size, segment, deviation_engine)
         if not segment_rows:
             raise ReplayError(
                 f"{segment.kind}({segment.name}) 구간에서 점수가 하나도 나오지 않았습니다. "
                 "구간이 윈도우 길이보다 짧거나 데이터가 없습니다"
             )
         rows.extend(segment_rows)
-    group_names = tuple(artifact.groups) if artifact.groups else ("all",)
+    group_names: tuple[str, ...] = ()
+    if artifact is not None:
+        group_names = tuple(artifact.groups) if artifact.groups else ("all",)
+    if deviation_artifact is not None:
+        group_names += tuple(deviation_artifact.signals)
     return rows, group_names

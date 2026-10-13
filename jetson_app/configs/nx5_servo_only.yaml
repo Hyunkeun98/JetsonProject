@@ -1,0 +1,33 @@
+# NX5 데모 라인: 서보 3축(AxX, AxZ, AxCV)의 Pos/Vel/Trq만 입력과 점수에 쓴다.
+# ProcStart(공정 신호)와 TaktTime은 쓰지 않는다 -> 동작/대기 상태별 기준 없이 서보 값 자체만 본다.
+equipment_id: nx5
+mqtt:
+  subscribe_topics:
+  - dx1/AxisData
+  publish_topic: jetson/nx5/anomaly
+  command_topic: jetson/nx5/cmd
+groups:
+  axis_x:
+    tags:
+    - NX5_AxisData:AxX_Act_Pos
+    - NX5_AxisData:AxX_Act_Vel
+    - NX5_AxisData:AxX_Act_Trq
+  axis_z:
+    tags:
+    - NX5_AxisData:AxZ_Act_Pos
+    - NX5_AxisData:AxZ_Act_Vel
+    - NX5_AxisData:AxZ_Act_Trq
+  axis_cv:
+    tags:
+    - NX5_AxisData:AxCV_Act_Pos
+    - NX5_AxisData:AxCV_Act_Vel
+    - NX5_AxisData:AxCV_Act_Trq
+resample_interval_ms: 100
+max_lateness_ms: 500
+window_size: 30
+calibration:
+  max_duration: 7d
+  min_samples: 3000
+training:
+  max_samples: 45000
+  epochs: 20

@@ -23,6 +23,8 @@ class AnomalyResult:
     top_deviant_tag: str
     # 그룹 이름 -> 그룹 점수/원인 태그. 그룹 구성이 없으면 모든 태그를 한 그룹 "all"로 본다.
     group_results: dict = field(default_factory=dict)
+    # 점수에서 뺀 태그를 포함한 그룹 태그별 점수(z). 태그 조합을 고르는 도구가 쓴다.
+    tag_z: dict = field(default_factory=dict)
 
 
 class InferenceEngine:
@@ -30,8 +32,9 @@ class InferenceEngine:
     실제값과의 오차를 캘리브레이션 구간 "정상 오차" 통계로 재정규화해 이상 점수를 낸다
     (설계 스펙 2026-08-04 문서 6절)."""
 
-    def __init__(self, artifact: ModelArtifact) -> None:
+    def __init__(self, artifact: ModelArtifact, exclude_tags: tuple[str, ...] = ()) -> None:
         self._artifact = artifact
+        self._exclude_tags = frozenset(exclude_tags)
         self._tags = artifact.tags
         self._continuous_indices, self._binary_indices = type_indices(
             artifact.tags, artifact.tag_types
@@ -107,6 +110,8 @@ class InferenceEngine:
             group_best_tag: str | None = None
             group_best_z: float | None = None
             for tag in group_tags:
+                if tag in self._exclude_tags:
+                    continue
                 z = z_by_tag.get(tag)
                 if z is not None and (group_best_z is None or z > group_best_z):
                     group_best_z = z
@@ -123,6 +128,7 @@ class InferenceEngine:
             anomaly_score=top_group.score,
             top_deviant_tag=top_group.top_tag,
             group_results=group_results,
+            tag_z=z_by_tag,
         )
 
     def _stats_for(self, tag: str, state_value: float | None) -> tuple[float, float]:

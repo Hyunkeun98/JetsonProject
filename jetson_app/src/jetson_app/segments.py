@@ -22,6 +22,8 @@ class Segment:
     name: str
     start_ns: int
     end_ns: int  # 구간은 [start_ns, end_ns)
+    # 이상 구간에서 이 이상이 드러나야 하는 그룹. 비어 있으면 특정하지 않는다(태그 조합 선택 도구가 쓴다).
+    groups: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,15 @@ def _parse_kind(raw: dict, kind: str) -> tuple[Segment, ...]:
         name = item.get("name") or f"{kind}_{index}"
         if not isinstance(name, str):
             raise SegmentsError(f"{kind} {index}번째 구간의 name은 문자열이어야 합니다")
-        segments.append(Segment(kind=kind, name=name, start_ns=start_ns, end_ns=end_ns))
+        groups = item.get("groups", ())
+        if groups:
+            if kind != KIND_ANOMALY:
+                raise SegmentsError(f"{kind} {index}번째 구간: groups는 anomaly에서만 쓸 수 있습니다")
+            if not isinstance(groups, list) or not all(isinstance(g, str) and g for g in groups):
+                raise SegmentsError(f"{kind} {index}번째 구간의 groups는 그룹 이름의 목록이어야 합니다")
+        segments.append(
+            Segment(kind=kind, name=name, start_ns=start_ns, end_ns=end_ns, groups=tuple(groups or ()))
+        )
     return tuple(segments)
 
 

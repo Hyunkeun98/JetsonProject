@@ -24,6 +24,8 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
 | 저장한 파일로 학습/점수 (`jetson-replay`) | 구현 완료 |
 | 임계값 추천 (`jetson-threshold`) | 구현 완료 |
 | 점수 그래프 (실시간 웹 `--web-port`, 저장 파일 `jetson-plot`) | 구현 완료 |
+| 기준값 이탈 점수 `deviation` (위치 신호의 충격 감지, GRU와 별개) | 구현 완료, 앱·replay 연결, 테스트 통과 (미커밋 변경 포함) |
+| 후보 태그 추천 `jetson-deviation-suggest` | 구현 완료 |
 | 실제 MQTT 연결로 `--web-port` 동작 확인 | **미확인** |
 | Jetson 실기에서 학습 시간 측정 | **미측정** (PC 기준: 19,350스텝 약 12.5분) |
 | 임계값 확정 | **진행 중** (아래 데이터 현황 참고) |
@@ -31,7 +33,7 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
 | 상위 시스템(PLC/표시) 연동 | 미착수 |
 | 자동 시작/상태 확인 명령 | 미착수 |
 
-테스트는 약 337개이고 모두 통과합니다. 새 도구(replay/threshold/dashboard)는 별도의 독립 코드 리뷰를 아직 받지 않았습니다.
+테스트는 430개이고 모두 통과합니다. 새 도구(replay/threshold/dashboard)는 별도의 독립 코드 리뷰를 아직 받지 않았습니다.
 
 ## 3. 데이터 현황과 지금까지 알게 된 것
 
@@ -45,6 +47,11 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
   - 정지 구간만으로 학습한 모델로 보면 X축(약함)과 CV축 접촉은 정상과 구분되고, Z축은 신호 자체에 변화가 없었습니다.
   - 실제 흔들림은 batches.txt의 START보다 3~7초 앞서 나타납니다. 라벨은 "손을 댄 순간" 기준으로 적어야 합니다.
 - **run3** (수집 중): 장비 구동 중 (1) 정상, (2) 대기 중인 축에 에러, (3) 동작 중인 축에 에러를 섞은 데이터입니다. 이 데이터로 임계값을 확정할 예정입니다.
+
+- **run3** (정상 10사이클)와 **run4** (7사이클, 대기 중인 축에 충격 9건):
+  - 서보 속도·토크만 보는 GRU와 공정 단위 템플릿 비교는 충격을 한 건도 못 잡았습니다. 충격이 가장 뚜렷하게 나타나는 신호는 **Pos의 급한 이탈**이고, 속도·토크는 정상 변동에 묻힙니다.
+  - 라벨(`batches.txt`)은 DX1 시각보다 약 6초 늦습니다(PC 시계 차이). 이를 모르고 라벨 구간만 비교해서 "신호가 없다"고 잘못 결론 낸 적이 있습니다. 평가 전에 원본 신호로 시각을 맞추세요.
+  - Pos 기준 `deviation`(run3로 학습, run4로 검증): 충격 9건 중 7건 검출, 정상 구간 알람 0건. 못 찾은 2건은 Pos에 흔적이 없습니다. 학습은 몇 초 걸립니다(GRU는 약 16분). 방식과 한계는 README의 "기준값 이탈 점수" 절.
 
 **남은 핵심 결정:** 장비가 멈춰 있는 동안에도 서보를 감시할지 여부입니다. 감시한다면 정지 상태 정상 데이터를 따로 모아 학습해야 하고, 아니라면 정지 상태를 감시에서 제외해야 합니다.
 
@@ -73,11 +80,11 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 |---|---|
 | `subscriber_cli.py` | `jetson-app` 진입점. 설정을 읽고 파이프라인을 만들고 MQTT를 구독. `--web-port`로 웹 대시보드 시작 |
 | `pipeline.py` | 모든 부품을 연결하는 조립 지점(`build_pipeline`) |
-| `config.py` | 설정 YAML 로드와 검증(그룹, 알람, 학습, 캘리브레이션 설정 등) |
+| `config.py` | 설정 YAML 로드와 검증(그룹, 알람, 학습, 캘리브레이션, `deviation` 설정 등). `tags`는 GRU 입력 태그, `all_tags`는 구독할 태그 전체 |
 | `mqtt_subscriber.py` | MQTT 메시지 수신, DX1 JSON의 records 파싱 및 필터 |
 | `timeparse.py` | DX1 ISO 8601 타임스탬프 → epoch 나노초 |
 | `resampler.py` | 이벤트 시각 기준으로 값을 100ms 격자에 배치, watermark와 gap 처리 |
-| `snapshot_processor.py` | 확정된 스텝을 큐로 받아 처리하는 워커(캘리브레이션 저장 또는 추론) |
+| `snapshot_processor.py` | 확정된 스텝을 큐로 받아 처리하는 워커(캘리브레이션 저장 또는 추론). GRU 그룹과 deviation 신호의 점수를 한 발행으로 합친다 |
 | `buffer.py` | 고정 크기 슬라이딩 윈도우 |
 | `calibration.py` | CALIBRATING/MONITORING 상태 관리, 상태 파일 영속화, 캘리브레이션 데이터 저장 |
 | `command_subscriber.py` | MQTT 명령(train/recalibrate) 수신 |
@@ -90,7 +97,8 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 | `model.py` | GRU 모델(연속 태그는 회귀, 이진 태그는 분류 head) |
 | `windowing.py` | 학습용 (윈도우, 정답) 쌍 생성 |
 | `tag_stats.py` | 태그 종류 판별과 정규화 통계 |
-| `training.py` | 학습, 정상 오차 통계(상태별), 모델 파일 저장/로드 |
+| `training.py` | 학습, 정상 오차 통계(상태별), 모델 파일 저장/로드. `make_equipment_train_fn`은 설정에 맞게 GRU와 deviation 학습을 모두 수행 |
+| `deviation.py` | 기준값 이탈 점수(torch 불필요): 스트리밍 계산기, 정상 데이터로 잡음·움직임 기준·알람 기준 자동 학습, 엔진, 학습 결과 JSON 저장/로드 |
 | `inference.py` | 실시간 예측과 점수 계산, 학습 완료 시 모델 교체 |
 | `debounce.py` | 점수가 임계값을 연속 N번 넘으면 알람 확정 |
 | `publisher.py` | 점수/알람/원인 태그를 MQTT로 발행 |
@@ -104,6 +112,9 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 | `scores.py` | 점수 CSV 입출력 |
 | `threshold.py`, `threshold_cli.py` | `jetson-threshold`. 임계값 후보별 정상 오탐/이상 검출/지연을 시뮬레이션하고 추천 |
 | `datalist_to_config.py` | `jetson-datalist`. DataList 엑셀 → 설정 YAML 생성 |
+| `deviation_suggest.py`, `deviation_suggest_cli.py` | `jetson-deviation-suggest`. 정상 데이터를 훑어 deviation에 맞는 태그를 이유와 함께 추천하고 설정 조각을 출력 |
+| `tag_select.py`, `tag_select_cli.py` | `jetson-select-tags`. GRU 그룹의 점수 태그 조합 선택(`score_exclude_tags`) |
+| `process_scores.py`, `process_scores_cli.py` | `jetson-procscores`. 사이클·공정별 점수 표 |
 
 ### 시각화
 
@@ -134,7 +145,7 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 
 ## 8. 앞으로 할 일 (우선순위 순)
 
-1. run3로 대기/동작 중 서보 에러 검증, 임계값 확정.
+1. 더 많은 정상 사이클로 `deviation` 알람 기준 확정, 동작 중인 축에 가해진 이상 감지 방법 검토(지금은 움직이는 구간을 점수에서 뺍니다), 더 큰 충격이 "움직임"으로 취급되어 점수 0이 되는 한계 보완.
 2. 장비 정지 상태 처리 방침 결정과 반영(정지 상태 학습 또는 감시 제외).
 3. 서보 오탐이 몰린 대기 구간의 기준 폭(`_floor_std`) 점검.
 4. 실제 MQTT로 `--web-port` 동작 확인, 좁은 화면 레이아웃 확인.

@@ -6,7 +6,7 @@ import sys
 from .config import ConfigError, load_equipment_config
 from .pipeline import build_pipeline
 from .score_history import DEFAULT_HISTORY_SECONDS
-from .training import make_train_fn, model_artifact_path
+from .training import make_equipment_train_fn, model_artifact_path
 from .web_server import ScoreWebServer
 
 
@@ -45,15 +45,7 @@ def main() -> None:
         # 콜백)에서야 드러나지 않도록, --calibration-dir과 동일하게 기동 시점에
         # 디렉터리를 만들어 OSError를 아래 핸들러로 흘린다.
         model_path.parent.mkdir(parents=True, exist_ok=True)
-        train_fn = make_train_fn(
-            tags=config.tags,
-            window_size=config.window_size,
-            model_path=model_path,
-            resample_interval_ms=config.resample_interval_ms,
-            groups=config.group_specs(),
-            epochs=config.training.epochs,
-            max_training_samples=config.training.max_samples,
-        )
+        train_fn = make_equipment_train_fn(config, args.model_dir)
         pipeline = build_pipeline(
             config=config,
             calibration_dir=args.calibration_dir,

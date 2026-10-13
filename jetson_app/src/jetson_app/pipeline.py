@@ -15,6 +15,12 @@ from .calibration import (
 from .command_subscriber import CommandSubscriber
 from .config import EquipmentConfig
 from .debounce import Debouncer
+from .deviation import (
+    DeviationEngine,
+    check_deviation_artifact,
+    deviation_artifact_path,
+    load_deviation_artifact,
+)
 from .inference import ActiveModelHolder, InferenceEngine
 from .mqtt_subscriber import MqttRecordSubscriber, Record
 from .publisher import ResultPublisher
@@ -34,6 +40,8 @@ class Pipeline:
     snapshotter: SnapshotProcessor
     mqtt_subscriber: MqttRecordSubscriber
     command_subscriber: CommandSubscriber
+    # 기준값 이탈 점수 엔진(설정에 deviation이 없거나 아직 학습 전이면 get()이 None).
+    deviation_holder: ActiveModelHolder
     # 웹 화면용 점수 이력. build_pipeline(history_seconds=0)이면 None이다.
     history: ScoreHistory | None = None
 
@@ -46,7 +54,7 @@ def build_pipeline(
     history_seconds: int = 0,
 ) -> Pipeline:
     resampler = EventTimeResampler(
-        tags=config.tags,
+        tags=config.all_tags,
         interval_ms=config.resample_interval_ms,
         max_lateness_ms=config.max_lateness_ms,
         window_size=config.window_size,
@@ -75,6 +83,8 @@ def build_pipeline(
     state_store = StateStore(state_path)
 
     inference_engine_holder = ActiveModelHolder()
+    deviation_holder = ActiveModelHolder()
+    deviation_path = deviation_artifact_path(model_dir, config.equipment_id)
     group_specs = config.group_specs()
     # 그룹마다 독립된 디바운서: 한 그룹의 연속 초과가 다른 그룹의 알람 확정에 영향을 주지 않는다.
     debouncers = {
@@ -82,6 +92,13 @@ def build_pipeline(
             threshold=config.alarm.threshold, confirm_ticks=config.alarm.confirm_steps
         )
         for name in group_specs
+    }
+    # 기준값 이탈 신호도 신호마다 독립된 디바운서를 쓴다. 충격은 짧아서 기본은 1스텝(deviation.confirm_steps).
+    deviation_debouncers = {
+        spec.name: Debouncer(
+            threshold=config.alarm.threshold, confirm_ticks=config.deviation.confirm_steps
+        )
+        for spec in (config.deviation.signals if config.deviation else ())
     }
 
     def _check_artifact_matches_config(artifact: ModelArtifact) -> None:
@@ -106,16 +123,29 @@ def build_pipeline(
                 f"groups {artifact.groups} vs {group_specs}"
             )
 
+    def _load_engines() -> None:
+        """저장된 학습 결과를 모두 읽어 검사한 뒤 엔진으로 올린다(하나라도 실패하면 예외, 아무것도 올리지 않는다)."""
+        gru_engine = None
+        if config.tags:
+            artifact = load_artifact(model_path)
+            _check_artifact_matches_config(artifact)
+            gru_engine = InferenceEngine(artifact, config.score_exclude_tags)
+        deviation_engine = None
+        if config.deviation is not None:
+            deviation_artifact = load_deviation_artifact(deviation_path)
+            check_deviation_artifact(deviation_artifact, config)
+            deviation_engine = DeviationEngine(deviation_artifact, config.alarm.threshold)
+        inference_engine_holder.set(gru_engine)
+        deviation_holder.set(deviation_engine)
+
     def wrapped_train_fn(samples: list[CalibrationSample]) -> None:
         train_fn(samples)
         # 학습이 방금 성공적으로 저장한 모델을 즉시 메모리에 올려, 다음 스텝부터
         # 바로 채점을 시작할 수 있게 한다 (재시작을 기다릴 필요 없음).
-        artifact = load_artifact(model_path)
-        _check_artifact_matches_config(artifact)
-        inference_engine_holder.set(InferenceEngine(artifact))
+        _load_engines()
         # 새 모델은 오차 통계가 완전히 다르므로, 이전 모델 점수로 쌓인 연속 초과
         # 카운터를 물려받아 첫 스텝부터 알람이 확정되는 일이 없도록 모든 그룹을 리셋한다.
-        for debouncer in debouncers.values():
+        for debouncer in (*debouncers.values(), *deviation_debouncers.values()):
             debouncer.reset()
 
     calibration_manager = CalibrationManager(
@@ -128,10 +158,8 @@ def build_pipeline(
 
     if calibration_manager.state == CalibrationState.MONITORING:
         try:
-            artifact = load_artifact(model_path)
-            _check_artifact_matches_config(artifact)
-            inference_engine_holder.set(InferenceEngine(artifact))
-            print(f"[build_pipeline] 저장된 모델을 불러와 MONITORING으로 재개: {model_path}")
+            _load_engines()
+            print(f"[build_pipeline] 저장된 모델을 불러와 MONITORING으로 재개: {model_dir}")
         except Exception as e:
             # 모델 파일 손상/누락, 또는 config와 불일치 — MONITORING 진입을 막고
             # CALIBRATING으로 폴백해 사람이 재학습을 판단하도록 한다
@@ -143,7 +171,7 @@ def build_pipeline(
     processor_publisher = result_publisher
     if history_seconds > 0:
         capacity = max(1, history_seconds * 1000 // config.resample_interval_ms)
-        history = ScoreHistory(capacity, tuple(group_specs))
+        history = ScoreHistory(capacity, (*group_specs, *deviation_debouncers))
         processor_publisher = HistoryRecordingPublisher(result_publisher, history)
 
     snapshotter = SnapshotProcessor(
@@ -152,6 +180,8 @@ def build_pipeline(
         inference_engine_holder=inference_engine_holder,
         debouncers=debouncers,
         result_publisher=processor_publisher,
+        deviation_holder=deviation_holder,
+        deviation_debouncers=deviation_debouncers,
     )
 
     command_subscriber = CommandSubscriber(config.command_topic, calibration_manager)
@@ -166,5 +196,6 @@ def build_pipeline(
         snapshotter=snapshotter,
         mqtt_subscriber=mqtt_subscriber,
         command_subscriber=command_subscriber,
+        deviation_holder=deviation_holder,
         history=history,
     )

@@ -94,6 +94,6 @@ class MqttRecordSubscriber:
 
     def _handle_message(self, client, userdata, msg):
         for record in parse_and_filter_records(
-            msg.payload, self._config.tags, on_invalid_timestamp=self._invalid_timestamps.add
+            msg.payload, self._config.all_tags, on_invalid_timestamp=self._invalid_timestamps.add
         ):
             self._on_record(record)
