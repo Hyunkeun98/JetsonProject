@@ -260,6 +260,50 @@ groups:
 3. **네트워크**: DX1과 Jetson이 같은 서브넷에 있는지, Jetson 방화벽(1-4)이 막고 있지 않은지 확인한다.
 4. **인증 실패**: 브로커가 연결을 거부하면(`rc != 0`) 콘솔에 `MQTT 연결 실패 (rc=...)` 메시지가 출력된다 — 브로커 쪽 인증/ACL 설정(1-2)을 확인한다.
 
+## jetson-studio: 화면에서 설정·수집·학습·감시
+
+터미널과 YAML 편집 없이 브라우저 화면 하나로 "설정 → 정상 데이터 수집 → 학습 → 감시"를 끝낸다. 위치 신호의 충격을 감지하는 기준값 이탈 점수(`deviation`) 전용이다(GRU 설정은 기존 `jetson-app`을 쓴다).
+
+```bash
+uv run jetson-studio                      # 브라우저가 자동으로 열린다 (http://localhost:8080)
+dist/jetson-studio/jetson-studio.exe     # Windows 패키지 (아래 "exe 만들기")
+```
+
+| 옵션 | 설명 |
+|---|---|
+| `--workspace PATH` | 설정, 수집 데이터, 모델을 저장할 폴더. 기본은 exe 옆 또는 현재 폴더의 `workspace/` |
+| `--web-host` | 화면을 열 주소. 기본 `127.0.0.1`(이 장비에서만) |
+| `--web-port` | 포트(기본 8080) |
+| `--token` | 다른 PC에서 조작할 때 필요한 비밀번호 |
+| `--no-browser` | 브라우저를 자동으로 열지 않는다 |
+
+화면은 4단계다. 현재 상태에 맞는 단계가 강조되고, 앱을 껐다 켜도 저장된 상태에서 이어진다.
+
+1. **설정**: 장비 이름, 브로커 주소·포트, 구독 토픽을 입력하고 정상 데이터 폴더를 적어 "태그 분석"을 누르면 추천 태그가 이유와 함께 표로 나온다(`jetson-deviation-suggest`와 같은 분석). 체크한 태그로 "설정 저장"하면 설정 YAML이 만들어지고 기존 설정 검사를 통과해야 저장된다.
+2. **수집**: "연결하고 수집 시작"을 누르면 브로커에 연결해 정상 데이터를 모은다. 진행률이 보이고, 30초 넘게 데이터가 없으면 경고가 나온다. 정상 사이클이 여러 번 들어가야 기준이 안정된다.
+3. **학습**: 수집 개수가 채워지면 "학습 시작"이 켜진다. 몇 초 안에 끝나고 신호별 대기 잡음 σ, 알람 기준, 움직임 기준이 표로 나온다. 값이 전혀 안 변하는 데이터(장비 정지)로는 학습이 실패하고 이유가 표시되며, 수집한 데이터는 그대로 남는다.
+4. **감시**: 점수 그래프와 알람을 본다. "처음부터 다시 수집"으로 재학습할 수 있다.
+
+**다른 PC에서 조작(Jetson):**
+
+```bash
+uv run jetson-studio --web-host 0.0.0.0 --token 비밀번호 --no-browser
+# 다른 PC 브라우저: http://<Jetson IP>:8080/?token=비밀번호
+```
+
+루프백(127.0.0.1)이 아닌 주소로 열 때 `--token`이 없으면 조작 기능이 꺼지고 점수만 볼 수 있다(읽기 전용). 모든 조작 요청은 토큰과 출처(Host/Origin)를 확인하고, 파일은 작업 폴더 안에만 쓴다. 부팅 때 자동으로 띄우려면 systemd 서비스로 등록한다.
+
+```ini
+[Service]
+WorkingDirectory=/home/jetson/jetson_app
+ExecStart=/home/jetson/.local/bin/uv run jetson-studio --web-host 0.0.0.0 --token CHANGE_ME --no-browser
+Restart=on-failure
+```
+
+**exe 만들기(Windows):** `powershell -ExecutionPolicy Bypass -File packaging/build_exe.ps1` → `dist/jetson-studio/jetson-studio.exe`(약 15MB, torch 미포함). 폴더째 복사해서 쓴다.
+
+**지금의 한계:** `deviation` 전용이다. 정상 데이터 폴더는 이 장비의 경로를 직접 입력한다(업로드 없음). 저장된 태그 선택은 앱을 다시 켜면 "태그 분석"을 한 번 더 눌러야 체크 상태로 복원된다. 실제 DX1/브로커 연결 시험은 아직 하지 않았다.
+
 ## 저장해 둔 파일로 학습·점수·임계값 추천
 
 MQTT 브로커 없이, 수집해 둔 DX1 JSON 파일(한 줄이 `{"records":[...]}`인 `.json`/`.jsonl`)로 앱과 같은 부품(리샘플러, 윈도우, `InferenceEngine`, 학습 함수)을 돌린다. 운영 경로는 바뀌지 않는다. 단계별 설명은 [사용 안내서](../docs/USER_GUIDE.md)의 "저장해 둔 파일로 평가하기"를 본다. 설계는 `../docs/superpowers/specs/2026-10-07-replay-and-threshold-design.md`.
