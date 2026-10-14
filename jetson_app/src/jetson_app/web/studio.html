@@ -1,1 +1,234 @@
-<!doctype html><title>jetson-studio</title><p>jetson-studio</p>
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jetson-studio</title>
+<style>
+:root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --sub:#5b6570; --line:#d8dde3;
+  --accent:#1f6feb; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0f1318; --card:#171c22; --ink:#e6e9ed; --sub:#97a1ac; --line:#2b333c;
+  --accent:#58a6ff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 system-ui, "Malgun Gothic", sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 18px; margin: 4px 0 12px; }
+.steps { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+.steps span { padding:4px 12px; border:1px solid var(--line); border-radius:999px; color:var(--sub); background:var(--card); }
+.steps span.done { color:var(--ok); border-color:var(--ok); }
+.steps span.now { color:#fff; background:var(--accent); border-color:var(--accent); }
+#banner { display:none; padding:8px 12px; margin-bottom:12px; border-radius:6px; border:1px solid var(--bad); color:var(--bad); background:var(--card); }
+#banner.warn { border-color:var(--warn); color:var(--warn); }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:12px; opacity:.55; }
+.card.active { opacity:1; border-color:var(--accent); }
+.card h2 { font-size:15px; margin:0 0 8px; }
+label { display:block; margin:6px 0 2px; color:var(--sub); font-size:12px; }
+input[type=text], input[type=number] { width:100%; max-width:420px; padding:6px 8px; border:1px solid var(--line); border-radius:6px;
+  background:var(--bg); color:var(--ink); }
+.row { display:flex; gap:12px; flex-wrap:wrap; }
+.row > div { flex:1 1 200px; }
+button { padding:6px 14px; border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:6px; cursor:pointer; margin:8px 8px 0 0; }
+button.secondary { background:transparent; color:var(--accent); }
+button:disabled { opacity:.4; cursor:not-allowed; }
+.table { overflow-x:auto; }
+table { border-collapse:collapse; width:100%; font-size:12px; margin-top:8px; }
+th, td { border-bottom:1px solid var(--line); padding:4px 8px; text-align:left; white-space:nowrap; }
+td.reason { white-space:normal; color:var(--sub); }
+.bar { height:10px; background:var(--line); border-radius:6px; overflow:hidden; margin:8px 0 4px; }
+.bar > i { display:block; height:100%; width:0; background:var(--accent); }
+.hint { color:var(--sub); font-size:12px; }
+iframe { width:100%; height:520px; border:1px solid var(--line); border-radius:6px; background:var(--card); }
+</style>
+</head>
+<body>
+<main>
+<h1>jetson-studio</h1>
+<div class="steps" id="steps"><span data-s="1">1 설정</span><span data-s="2">2 수집</span><span data-s="3">3 학습</span><span data-s="4">4 감시</span></div>
+<div id="banner"></div>
+
+<section class="card" data-step="1">
+  <h2>1. 설정</h2>
+  <div class="row">
+    <div><label for="equipment_id">장비 이름 (영문, 숫자, _ -)</label><input type="text" id="equipment_id" placeholder="nx5"></div>
+    <div><label for="subscribe_topics">구독 토픽 (쉼표로 구분)</label><input type="text" id="subscribe_topics" placeholder="dx1/AxisData"></div>
+  </div>
+  <div class="row">
+    <div><label for="host">브로커 주소</label><input type="text" id="host" value="localhost"></div>
+    <div><label for="port">포트</label><input type="number" id="port" value="1883"></div>
+    <div><label for="min_samples">학습에 필요한 수집 개수 (100ms당 1개)</label><input type="number" id="min_samples" value="3000"></div>
+  </div>
+  <label for="data_dir">정상 데이터 폴더 (이 장비에 저장된 DX1 JSON, 태그 추천용)</label>
+  <input type="text" id="data_dir" placeholder="C:\data\normal">
+  <div><button id="btn-analyze" class="secondary">태그 분석</button></div>
+  <div class="table"><table id="tags" hidden>
+    <thead><tr><th>선택</th><th>태그</th><th>종류</th><th>대기잡음</th><th>범위/잡음</th><th>판정과 이유</th></tr></thead><tbody></tbody>
+  </table></div>
+  <p class="hint">추천 태그는 평소 조용하고 값의 범위가 넓은 신호(예: 서보 위치)입니다. 추천을 따르면 충격 같은 순간적인 이탈을 잡습니다.</p>
+  <button id="btn-save">설정 저장</button>
+</section>
+
+<section class="card" data-step="2">
+  <h2>2. 정상 데이터 수집</h2>
+  <p class="hint">브로커에 연결해 정상 운전 데이터를 모읍니다. 정상 사이클이 여러 번(가능하면 10회 이상) 들어가야 기준이 안정됩니다.</p>
+  <div id="connection" class="hint"></div>
+  <div class="bar"><i id="progress"></i></div>
+  <div id="progress-text" class="hint"></div>
+  <button id="btn-start">연결하고 수집 시작</button>
+  <button id="btn-stop" class="secondary">중지</button>
+</section>
+
+<section class="card" data-step="3">
+  <h2>3. 학습</h2>
+  <p class="hint">수집한 정상 데이터로 신호별 잡음 크기와 알람 기준을 계산합니다. 몇 초 걸립니다.</p>
+  <button id="btn-train">학습 시작</button>
+  <div class="table"><table id="signals" hidden>
+    <thead><tr><th>신호</th><th>태그</th><th>대기잡음 σ</th><th>알람 기준</th><th>움직임 기준</th></tr></thead><tbody></tbody>
+  </table></div>
+</section>
+
+<section class="card" data-step="4">
+  <h2>4. 감시</h2>
+  <iframe id="dash" title="점수 그래프"></iframe>
+  <div><button id="btn-recalibrate" class="secondary">처음부터 다시 수집</button></div>
+</section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const STEP_OF = { SETUP: 1, READY: 2, COLLECTING: 2, TRAINING: 3, MONITORING: 4 };
+let token = "";
+try {
+  token = new URLSearchParams(location.search).get("token") || sessionStorage.getItem("studioToken") || "";
+  if (token) sessionStorage.setItem("studioToken", token);
+} catch (e) { /* 저장소를 못 써도 화면은 동작한다 */ }
+
+async function api(path, body) {
+  const options = body === undefined ? {} : {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Studio-Token": token },
+    body: JSON.stringify(body),
+  };
+  let response;
+  try { response = await fetch(path, options); }
+  catch (e) { throw new Error("앱에 연결할 수 없습니다. jetson-studio가 실행 중인지 확인하세요."); }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || ("요청이 실패했습니다 (" + response.status + ")"));
+  return data;
+}
+
+function banner(text, warn) {
+  const el = $("banner");
+  el.textContent = text || "";
+  el.className = warn ? "warn" : "";
+  el.style.display = text ? "block" : "none";
+}
+async function act(fn) {
+  try { await fn(); banner(""); } catch (e) { banner(e.message); }
+  refresh();
+}
+function cell(row, text, cls) {
+  const td = document.createElement("td");
+  td.textContent = text;
+  if (cls) td.className = cls;
+  row.appendChild(td);
+  return td;
+}
+const fmt = (v) => (v === null || v === undefined) ? "-" : Number(v).toPrecision(3);
+
+function renderTags(tags) {
+  const table = $("tags"), body = table.querySelector("tbody");
+  body.replaceChildren();
+  for (const t of tags) {
+    const row = document.createElement("tr");
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.value = t.tag; box.checked = t.recommended;
+    box.disabled = t.kind !== "continuous";
+    cell(row, "").appendChild(box);
+    cell(row, t.tag); cell(row, t.kind); cell(row, fmt(t.sigma));
+    cell(row, t.sigma === null ? "-" : "10^" + t.dynamic_range.toFixed(1));
+    cell(row, (t.recommended ? "추천: " : "") + t.reason, "reason");
+    body.appendChild(row);
+  }
+  table.hidden = tags.length === 0;
+}
+function selectedTags() {
+  return Array.from($("tags").querySelectorAll("input:checked")).map((b) => b.value);
+}
+function renderSignals(signals) {
+  const table = $("signals"), body = table.querySelector("tbody");
+  body.replaceChildren();
+  for (const s of signals) {
+    const row = document.createElement("tr");
+    cell(row, s.name); cell(row, s.tag); cell(row, fmt(s.sigma)); cell(row, fmt(s.limit)); cell(row, fmt(s.move_range));
+    body.appendChild(row);
+  }
+  table.hidden = signals.length === 0;
+}
+
+let dashLoaded = false;
+function render(s) {
+  const now = STEP_OF[s.stage];
+  document.querySelectorAll("#steps span").forEach((el) => {
+    const n = Number(el.dataset.s);
+    el.className = n < now ? "done" : (n === now ? "now" : "");
+  });
+  document.querySelectorAll(".card").forEach((el) => {
+    el.classList.toggle("active", Number(el.dataset.step) === now);
+  });
+  const control = s.control_enabled;
+  const running = s.stage === "COLLECTING" || s.stage === "TRAINING" || s.stage === "MONITORING";
+  $("btn-analyze").disabled = !control;
+  $("btn-save").disabled = !control || running;
+  $("btn-start").disabled = !control || s.stage !== "READY";
+  $("btn-stop").disabled = !control || !running || s.stage === "TRAINING";
+  $("btn-train").disabled = !control || s.stage !== "COLLECTING" || s.collected < s.required;
+  $("btn-recalibrate").disabled = !control || s.stage !== "MONITORING";
+  $("connection").textContent = running ? (s.connected ? "브로커 연결됨" : "브로커 연결이 끊겼습니다. 자동으로 다시 연결합니다.") : "연결 안 됨";
+  const pct = s.required > 0 ? Math.min(100, Math.round(100 * s.collected / s.required)) : 0;
+  $("progress").style.width = pct + "%";
+  $("progress-text").textContent = running ? (s.collected + " / " + s.required + " (" + pct + "%)") : "";
+  renderSignals(s.signals);
+  if (s.stage === "MONITORING" && !dashLoaded) { $("dash").src = "/dashboard"; dashLoaded = true; }
+  if (s.stage !== "MONITORING") dashLoaded = false;
+  if (!control) banner("조작 기능이 꺼져 있습니다(읽기 전용). 이 장비에서 열거나 --token을 지정해 다시 시작하세요.", true);
+  else if (s.error) banner(s.error);
+  else if (s.no_data) banner("30초 넘게 데이터가 들어오지 않습니다. 토픽 이름과 DX1 발행 상태를 확인하세요.", true);
+}
+async function refresh() {
+  try { render(await api("/api/state")); } catch (e) { banner(e.message); }
+}
+
+$("btn-analyze").onclick = () => act(async () => {
+  renderTags((await api("/api/analyze", { data_dir: $("data_dir").value })).tags);
+});
+$("btn-save").onclick = () => act(() => api("/api/config", {
+  equipment_id: $("equipment_id").value,
+  host: $("host").value,
+  port: $("port").value,
+  subscribe_topics: $("subscribe_topics").value.split(",").map((t) => t.trim()).filter(Boolean),
+  tags: selectedTags(),
+  min_samples: $("min_samples").value,
+}));
+$("btn-start").onclick = () => act(() => api("/api/start", {}));
+$("btn-stop").onclick = () => act(() => api("/api/stop", {}));
+$("btn-train").onclick = () => act(() => api("/api/train", {}));
+$("btn-recalibrate").onclick = () => act(() => api("/api/recalibrate", {}));
+
+(async function init() {
+  try {
+    const form = await api("/api/config");
+    if (form.equipment_id) {
+      $("equipment_id").value = form.equipment_id;
+      $("host").value = form.host;
+      $("port").value = form.port;
+      $("subscribe_topics").value = form.subscribe_topics.join(", ");
+      $("min_samples").value = form.min_samples;
+    }
+  } catch (e) { banner(e.message); }
+  refresh();
+  setInterval(refresh, 1000);
+})();
+</script>
+</body>
+</html>
