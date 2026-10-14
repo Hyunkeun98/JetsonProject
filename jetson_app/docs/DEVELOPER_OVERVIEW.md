@@ -36,7 +36,7 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
 | 상위 시스템(PLC/표시) 연동 | 미착수 |
 | 자동 시작/상태 확인 명령 | 미착수 |
 
-테스트는 483개이고 모두 통과합니다. 새 도구(replay/threshold/dashboard)는 별도의 독립 코드 리뷰를 아직 받지 않았습니다.
+테스트는 488개이고 모두 통과합니다. 새 도구(replay/threshold/dashboard)는 별도의 독립 코드 리뷰를 아직 받지 않았습니다.
 
 ## 3. 데이터 현황과 지금까지 알게 된 것
 

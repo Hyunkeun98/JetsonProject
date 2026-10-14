@@ -162,3 +162,21 @@ def test_control_can_be_disabled_entirely(tmp_path):
         assert _request(server, "GET", "/api/state")[1]["control_enabled"] is False
     finally:
         server.stop()
+
+
+def test_a_second_server_cannot_bind_a_port_that_is_already_serving(open_server, tmp_path):
+    _, server = open_server
+
+    with pytest.raises(OSError):
+        StudioServer(StudioController(tmp_path / "other", io=FakeIO(), run_worker=False), port=server.port)
+
+
+def test_negative_content_length_is_rejected(open_server):
+    _, server = open_server
+    conn = http.client.HTTPConnection("127.0.0.1", server.port)
+    conn.putrequest("POST", "/api/start")
+    conn.putheader("Content-Length", "-5")
+    conn.endheaders()
+
+    assert conn.getresponse().status == 400
+    conn.close()

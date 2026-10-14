@@ -27,3 +27,8 @@ def test_control_is_disabled_for_a_remote_host_without_a_token():
     assert cli.control_enabled("0.0.0.0", "s3cret") is True
     assert cli.control_enabled("127.0.0.1", None) is True
     assert cli.control_enabled("localhost", None) is True
+
+
+def test_studio_url_percent_encodes_the_token():
+    assert cli.studio_url("127.0.0.1", 8080, "a+b#c") == "http://localhost:8080/?token=a%2Bb%23c"
+    assert cli.studio_url("0.0.0.0", 9000, None) == "http://0.0.0.0:9000/"

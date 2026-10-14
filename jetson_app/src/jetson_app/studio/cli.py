@@ -5,6 +5,7 @@ import sys
 import threading
 import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
 from .controller import StudioController
 from .server import LOOPBACK_HOSTS, StudioServer
@@ -20,6 +21,12 @@ def default_workspace() -> Path:
 def control_enabled(web_host: str, token) -> bool:
     """루프백이 아닌 주소로 열 때는 토큰이 있어야 조작 기능을 켠다."""
     return web_host in LOOPBACK_HOSTS or bool(token)
+
+
+def studio_url(web_host: str, port: int, token) -> str:
+    shown_host = "localhost" if web_host in LOOPBACK_HOSTS else web_host
+    url = f"http://{shown_host}:{port}/"
+    return url + (f"?token={quote(token, safe='')}" if token else "")
 
 
 def main(argv=None) -> None:
@@ -43,8 +50,7 @@ def main(argv=None) -> None:
         raise SystemExit(2)
 
     server.start()
-    shown_host = "localhost" if args.web_host in LOOPBACK_HOSTS else args.web_host
-    url = f"http://{shown_host}:{server.port}/" + (f"?token={args.token}" if args.token else "")
+    url = studio_url(args.web_host, server.port, args.token)
     print(f"[studio] 화면: {url}")
     print(f"[studio] 작업 폴더: {workspace}")
     if not enabled:

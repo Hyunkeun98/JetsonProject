@@ -74,6 +74,7 @@ iframe { width:100%; height:520px; border:1px solid var(--line); border-radius:6
   <div class="bar"><i id="progress"></i></div>
   <div id="progress-text" class="hint"></div>
   <button id="btn-start">연결하고 수집 시작</button>
+  <button id="btn-discard" class="secondary">수집한 데이터 지우고 다시 시작</button>
   <button id="btn-stop" class="secondary">중지</button>
 </section>
 
@@ -117,14 +118,21 @@ async function api(path, body) {
   return data;
 }
 
-function banner(text, warn) {
+// 배너는 세 곳에서 온다: 방금 한 조작의 오류(actionError), 서버와의 연결 문제(connError), 서버 상태에서 읽은 안내(stateMessage).
+// 상태 안내와 연결 문제는 조건이 사라지면 저절로 지워지고, 조작 오류는 다음 조작이 성공할 때 지워진다.
+let actionError = "", connError = "", stateMessage = null;
+function showBanner() {
+  const shown = actionError ? { text: actionError, warn: false }
+    : connError ? { text: connError, warn: false }
+    : (stateMessage || { text: "", warn: false });
   const el = $("banner");
-  el.textContent = text || "";
-  el.className = warn ? "warn" : "";
-  el.style.display = text ? "block" : "none";
+  el.textContent = shown.text;
+  el.className = shown.warn ? "warn" : "";
+  el.style.display = shown.text ? "block" : "none";
 }
 async function act(fn) {
-  try { await fn(); banner(""); } catch (e) { banner(e.message); }
+  try { await fn(); actionError = ""; } catch (e) { actionError = e.message; }
+  showBanner();
   refresh();
 }
 function cell(row, text, cls) {
@@ -184,6 +192,7 @@ function render(s) {
   $("btn-stop").disabled = !control || !running || s.stage === "TRAINING";
   $("btn-train").disabled = !control || s.stage !== "COLLECTING" || s.collected < s.required;
   $("btn-recalibrate").disabled = !control || s.stage !== "MONITORING";
+  $("btn-discard").disabled = !control || s.stage !== "COLLECTING";
   $("connection").textContent = running ? (s.connected ? "브로커 연결됨" : "브로커 연결이 끊겼습니다. 자동으로 다시 연결합니다.") : "연결 안 됨";
   const pct = s.required > 0 ? Math.min(100, Math.round(100 * s.collected / s.required)) : 0;
   $("progress").style.width = pct + "%";
@@ -191,12 +200,16 @@ function render(s) {
   renderSignals(s.signals);
   if (s.stage === "MONITORING" && !dashLoaded) { $("dash").src = "/dashboard"; dashLoaded = true; }
   if (s.stage !== "MONITORING") dashLoaded = false;
-  if (!control) banner("조작 기능이 꺼져 있습니다(읽기 전용). 이 장비에서 열거나 --token을 지정해 다시 시작하세요.", true);
-  else if (s.error) banner(s.error);
-  else if (s.no_data) banner("30초 넘게 데이터가 들어오지 않습니다. 토픽 이름과 DX1 발행 상태를 확인하세요.", true);
+  if (!control) stateMessage = { text: "조작 기능이 꺼져 있습니다(읽기 전용). 이 장비에서 열거나 --token을 지정해 다시 시작하세요.", warn: true };
+  else if (s.error) stateMessage = { text: s.error, warn: false };
+  else if (s.no_data) stateMessage = { text: "30초 넘게 데이터가 들어오지 않습니다. 토픽 이름과 DX1 발행 상태를 확인하세요.", warn: true };
+  else stateMessage = null;
+  showBanner();
 }
 async function refresh() {
-  try { render(await api("/api/state")); } catch (e) { banner(e.message); }
+  try { render(await api("/api/state")); connError = ""; }
+  catch (e) { connError = e.message; }
+  showBanner();
 }
 
 $("btn-analyze").onclick = () => act(async () => {
@@ -214,6 +227,7 @@ $("btn-start").onclick = () => act(() => api("/api/start", {}));
 $("btn-stop").onclick = () => act(() => api("/api/stop", {}));
 $("btn-train").onclick = () => act(() => api("/api/train", {}));
 $("btn-recalibrate").onclick = () => act(() => api("/api/recalibrate", {}));
+$("btn-discard").onclick = () => act(() => api("/api/recalibrate", {}));
 
 (async function init() {
   try {
@@ -225,7 +239,7 @@ $("btn-recalibrate").onclick = () => act(() => api("/api/recalibrate", {}));
       $("subscribe_topics").value = form.subscribe_topics.join(", ");
       $("min_samples").value = form.min_samples;
     }
-  } catch (e) { banner(e.message); }
+  } catch (e) { connError = e.message; showBanner(); }
   refresh();
   setInterval(refresh, 1000);
 })();

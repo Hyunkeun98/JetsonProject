@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +16,12 @@ from .errors import StudioError
 MAX_BODY_BYTES = 64 * 1024
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 _STUDIO_PAGE = Path(__file__).resolve().parent.parent / "web" / "studio.html"
+
+
+class _Httpd(ThreadingHTTPServer):
+    # Windows에서는 SO_REUSEADDR이 이미 쓰는 포트에 또 바인딩되게 해서, 앱을 두 번 켜도 오류가 나지 않고
+    # 브라우저가 어느 쪽에 붙을지 알 수 없게 된다. Windows에서만 끈다(Linux는 재시작 직후 바인딩을 위해 켠다).
+    allow_reuse_address = os.name != "nt"
 
 
 class StudioServer:
@@ -57,7 +64,7 @@ class StudioServer:
             def log_message(self, fmt, *args):
                 pass
 
-        self._httpd = ThreadingHTTPServer((host, port), Handler)
+        self._httpd = _Httpd((host, port), Handler)
         self._httpd.daemon_threads = True
         self._thread = None
 
@@ -118,6 +125,8 @@ class StudioServer:
         try:
             length = int(h.headers.get("Content-Length") or 0)
         except ValueError:
+            return self._send_json(h, 400, {"error": "Content-Length가 올바르지 않습니다"})
+        if length < 0:
             return self._send_json(h, 400, {"error": "Content-Length가 올바르지 않습니다"})
         if length > MAX_BODY_BYTES:
             return self._send_json(h, 413, {"error": "요청이 너무 큽니다"})

@@ -23,3 +23,17 @@ def test_page_is_self_contained():
     assert not re.search(r"""(src|href)\s*=\s*["']https?://""", html)
     assert "innerHTML" not in html                       # 서버가 준 문자열은 textContent로만 넣는다
     assert "X-Studio-Token" in html and "/api/state" in html and "/dashboard" in html
+
+
+def test_page_lets_the_user_discard_collected_data_while_collecting():
+    html = _html()
+
+    assert 'id="btn-discard"' in html
+    assert "btn-discard" in html.split("function render(s)")[1]       # 수집 중에도 켜지는지 render가 다룬다
+
+
+def test_state_banner_is_cleared_when_its_condition_goes_away():
+    html = _html()
+
+    assert "function showBanner" in html and "stateMessage" in html
+    assert 'banner("")' not in html.split("function render(s)")[1].split("async function refresh")[0]
