@@ -7,7 +7,7 @@ from .buffer import SlidingWindow
 from .calibration import CalibrationManager, CalibrationState
 from .debounce import Debouncer
 from .droplog import DropCounter
-from .inference import ActiveModelHolder, GroupResult
+from .engine_types import ActiveModelHolder, GroupResult
 from .publisher import GroupOutput, ResultPublisher
 from .resampler import ResampledStep
 from .timeparse import format_epoch_ns

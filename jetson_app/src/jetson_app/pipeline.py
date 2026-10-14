@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .buffer import SlidingWindow
 from .calibration import (
@@ -21,13 +22,16 @@ from .deviation import (
     deviation_artifact_path,
     load_deviation_artifact,
 )
-from .inference import ActiveModelHolder, InferenceEngine
+from .engine_types import ActiveModelHolder
 from .mqtt_subscriber import MqttRecordSubscriber, Record
 from .publisher import ResultPublisher
 from .resampler import EventTimeResampler
 from .score_history import HistoryRecordingPublisher, ScoreHistory
 from .snapshot_processor import SnapshotProcessor
-from .training import ModelArtifact, load_artifact, model_artifact_path, state_marker_path
+from .artifact_paths import model_artifact_path, state_marker_path
+
+if TYPE_CHECKING:  # 타입 힌트 전용: 실행 시 torch를 불러오지 않는다
+    from .training import ModelArtifact
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,9 @@ def build_pipeline(
         """저장된 학습 결과를 모두 읽어 검사한 뒤 엔진으로 올린다(하나라도 실패하면 예외, 아무것도 올리지 않는다)."""
         gru_engine = None
         if config.tags:
+            from .inference import InferenceEngine
+            from .training import load_artifact
+
             artifact = load_artifact(model_path)
             _check_artifact_matches_config(artifact)
             gru_engine = InferenceEngine(artifact, config.score_exclude_tags)

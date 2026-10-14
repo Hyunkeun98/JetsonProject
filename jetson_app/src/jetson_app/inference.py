@@ -6,15 +6,10 @@ from dataclasses import dataclass, field
 import torch
 
 from .buffer import Snapshot
+from .engine_types import ActiveModelHolder, GroupResult  # noqa: F401  (기존 import 경로 유지)
 from .model import AnomalyGRU
 from .tag_stats import type_indices
 from .training import ModelArtifact, compute_raw_errors, normalize_continuous_columns
-
-
-@dataclass(frozen=True)
-class GroupResult:
-    score: float
-    top_tag: str
 
 
 @dataclass(frozen=True)
@@ -141,20 +136,3 @@ class InferenceEngine:
             if stats is not None:
                 return stats[0], stats[1]
         return self._artifact.error_stats[tag]
-
-
-class ActiveModelHolder:
-    """SnapshotProcessor(매 스텝, 읽기)와 학습 완료 콜백(train 명령 시, 쓰기)이 서로
-    다른 스레드에서 접근하는 현재 InferenceEngine을 스레드세이프하게 공유한다."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._engine: InferenceEngine | None = None
-
-    def get(self) -> InferenceEngine | None:
-        with self._lock:
-            return self._engine
-
-    def set(self, engine: InferenceEngine | None) -> None:
-        with self._lock:
-            self._engine = engine

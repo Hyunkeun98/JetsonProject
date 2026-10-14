@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from .artifact_paths import model_artifact_path, state_marker_path
 from .buffer import SlidingWindow
 from .calibration import CalibrationSample, CalibrationState, StateStore
 from .config import EquipmentConfig
@@ -11,19 +13,15 @@ from .deviation import (
     deviation_artifact_path,
     load_deviation_artifact,
 )
-from .inference import InferenceEngine
 from .mqtt_subscriber import Record, parse_and_filter_records
 from .resampler import EventTimeResampler, ResampledStep
 from .scores import ScoreRow
 from .segments import Segment, SegmentSet
 from .timeparse import format_epoch_ns
-from .training import (
-    ModelArtifact,
-    load_artifact,
-    make_equipment_train_fn,
-    model_artifact_path,
-    state_marker_path,
-)
+
+if TYPE_CHECKING:  # 타입 힌트 전용: 실행 시 torch를 불러오지 않는다
+    from .inference import InferenceEngine
+    from .training import ModelArtifact
 
 
 class ReplayError(ValueError):
@@ -100,6 +98,8 @@ def train_from_files(
         else deviation_artifact_path(model_dir, config.equipment_id)
     )
     model_path.parent.mkdir(parents=True, exist_ok=True)
+    from .training import make_equipment_train_fn
+
     make_equipment_train_fn(config, model_dir)(samples)
     StateStore(state_marker_path(model_dir, config.equipment_id)).write(CalibrationState.MONITORING)
     return model_path, len(samples)
@@ -109,6 +109,8 @@ def load_matching_artifact(config: EquipmentConfig, model_dir: str | Path) -> Mo
     path = model_artifact_path(model_dir, config.equipment_id)
     if not path.exists():
         raise ReplayError(f"모델 파일이 없습니다: {path} (먼저 jetson-replay train을 실행하세요)")
+    from .training import load_artifact
+
     artifact = load_artifact(path)
     if (
         artifact.window_size != config.window_size
@@ -193,7 +195,12 @@ def score_from_files(
     if not eval_segments:
         raise ReplayError("구간 파일에 normal_eval 또는 anomaly 구간이 없습니다")
     artifact = load_matching_artifact(config, model_dir) if config.tags else None
-    engine = InferenceEngine(artifact, config.score_exclude_tags) if artifact is not None else None
+    if artifact is not None:
+        from .inference import InferenceEngine
+
+        engine = InferenceEngine(artifact, config.score_exclude_tags)
+    else:
+        engine = None
     deviation_artifact = load_matching_deviation_artifact(config, model_dir) if config.deviation else None
     records = load_records(data_dir, config.all_tags, eval_segments)
     rows: list[ScoreRow] = []
