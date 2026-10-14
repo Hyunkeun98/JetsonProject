@@ -11,7 +11,7 @@ def _import_without_torch(*modules):
 
 @pytest.mark.parametrize(
     "module",
-    ["jetson_app.pipeline", "jetson_app.deviation", "jetson_app.deviation_suggest", "jetson_app.replay"],
+    ["jetson_app.pipeline", "jetson_app.deviation", "jetson_app.deviation_suggest", "jetson_app.replay", "jetson_app.studio.cli"],
 )
 def test_deviation_chain_imports_without_torch(module):
     result = _import_without_torch(module)

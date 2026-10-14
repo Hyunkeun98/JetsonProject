@@ -26,6 +26,7 @@ jetson-plot = "jetson_app.plot_cli:main"
 jetson-select-tags = "jetson_app.tag_select_cli:main"
 jetson-procscores = "jetson_app.process_scores_cli:main"
 jetson-deviation-suggest = "jetson_app.deviation_suggest_cli:main"
+jetson-studio = "jetson_app.studio.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.21,<0.12.0"]
