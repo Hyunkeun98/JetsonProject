@@ -241,3 +241,38 @@ def test_prune_drops_samples_older_than_max_duration_before_latest_event_time(
     manager.record_sample(Snapshot(values={"a": 2}), "2020-01-20T00:00:00+00:00")
 
     assert [s.values["a"] for s in writer.read_all()] == [2]
+
+
+def _manager(tmp_path, min_samples=3):
+    return CalibrationManager(
+        buffer_writer=CalibrationBufferWriter(tmp_path / "b.jsonl"),
+        min_samples=min_samples,
+        max_duration=timedelta(days=7),
+        train_fn=lambda samples: None,
+        state_store=StateStore(tmp_path / "s.state"),
+    )
+
+
+def test_sample_count_tracks_appends_train_and_recalibrate(tmp_path):
+    manager = _manager(tmp_path)
+    assert manager.sample_count == 0 and manager.min_samples == 3
+
+    for i in range(3):
+        manager.record_sample(Snapshot(values={"a": i}), f"2026-08-04T00:00:0{i}+00:00")
+    assert manager.sample_count == 3
+
+    manager.handle_train_command()
+    assert manager.sample_count == 0
+
+    manager.handle_recalibrate_command()
+    assert manager.sample_count == 0
+
+
+def test_sample_count_is_restored_from_existing_buffer(tmp_path):
+    first = _manager(tmp_path)
+    for i in range(2):
+        first.record_sample(Snapshot(values={"a": i}), f"2026-08-04T00:00:0{i}+00:00")
+
+    second = _manager(tmp_path)
+
+    assert second.sample_count == 2

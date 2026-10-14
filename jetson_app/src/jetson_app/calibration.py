@@ -135,18 +135,21 @@ class CalibrationManager:
         self._lock = threading.Lock()
         self._tick_count = 0
         self.state = state_store.read()
+        self._sample_count = buffer_writer.count()
 
     def record_sample(self, snapshot: Snapshot, timestamp: str) -> None:
         with self._lock:
             if self.state != CalibrationState.CALIBRATING:
                 return
             self._buffer_writer.append(snapshot, timestamp)
+            self._sample_count += 1
             self._tick_count += 1
             if self._tick_count % _PRUNE_CHECK_INTERVAL == 0:
                 # 이벤트 시각(DX1 시계) 기준으로 정리한다. Jetson 현재 시각과 비교하면 두
                 # 시계가 크게 다를 때 버퍼가 통째로 지워지거나 영원히 커진다.
                 cutoff = datetime.fromisoformat(timestamp) - self._max_duration
                 self._buffer_writer.prune_older_than(cutoff)
+                self._sample_count = self._buffer_writer.count()
 
     def handle_train_command(self) -> None:
         with self._lock:
@@ -159,11 +162,22 @@ class CalibrationManager:
                 )
             self._train_fn(samples)
             self._buffer_writer.clear()
+            self._sample_count = 0
             self.state = CalibrationState.MONITORING
             self._state_store.write(self.state)
 
     def handle_recalibrate_command(self) -> None:
         with self._lock:
             self._buffer_writer.clear()
+            self._sample_count = 0
             self.state = CalibrationState.CALIBRATING
             self._state_store.write(self.state)
+
+    @property
+    def sample_count(self) -> int:
+        """지금까지 모은 표본 수. 락을 잡지 않으므로 학습 중에도 읽을 수 있다."""
+        return self._sample_count
+
+    @property
+    def min_samples(self) -> int:
+        return self._min_samples
