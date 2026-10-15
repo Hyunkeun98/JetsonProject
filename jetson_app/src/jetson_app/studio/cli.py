@@ -65,10 +65,7 @@ def main(argv=None) -> None:
     except KeyboardInterrupt:
         print("\n중단됨")
     finally:
-        try:
-            controller.stop()
-        except Exception as e:
-            print(f"[studio] 종료 정리 중 오류(무시): {e}", file=sys.stderr)
+        controller.shutdown()
         server.stop()
 
 

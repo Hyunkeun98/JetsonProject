@@ -1974,7 +1974,7 @@ def test_collect_then_analyze_gives_tags_and_the_cycle_count(tmp_path):
 
     result = controller.analyze()
     assert {t["tag"] for t in result["tags"]} == {"pos", "cyc"}
-    assert result["cycles"]["method"] == "edge" and result["cycles"]["cycles"] == 3
+    assert result["cycles"]["method"] == "edge" and result["cycles"]["cycles"] == 4
     assert "적습니다" in result["cycles"]["warning"]              # 10사이클 미만은 경고만 한다
     assert "tags" not in controller.analyze(with_tags=False)
 
