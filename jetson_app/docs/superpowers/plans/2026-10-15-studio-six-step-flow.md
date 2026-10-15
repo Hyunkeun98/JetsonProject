@@ -220,13 +220,20 @@ def test_a_single_edge_is_not_a_cycle():
 
 def test_period_is_estimated_from_repeating_motion_when_there_is_no_cycle_signal():
     rng = random.Random(7)
-    counter = _feed(CycleCounter(), 3000, pos=_ramp, vel=lambda i: rng.uniform(-1, 1))
+    counter = _feed(CycleCounter(), 3000, pos=_ramp, pos2=lambda i: 2 * _ramp(i) + 5, vel=lambda i: rng.uniform(-1, 1))
 
     report = counter.report()
 
     assert report.method == "period" and report.exact is False and report.tag is None
     assert 28 <= report.period_seconds <= 32
     assert 9 <= report.cycles <= 11
+
+
+def test_a_period_found_in_only_one_tag_is_not_trusted():
+    rng = random.Random(7)
+    counter = _feed(CycleCounter(), 3000, pos=_ramp, vel=lambda i: rng.uniform(-1, 1))
+
+    assert counter.report().method == "none"
 
 
 def test_noise_without_any_repetition_gives_no_cycle_count():
@@ -250,7 +257,7 @@ def test_warning_only_below_ten_cycles_and_it_says_when_the_number_is_an_estimat
     few = _feed(CycleCounter(), 600, U0=lambda i: 1 if i % 100 >= 90 else 0).report()
     rng = random.Random(5)
     unknown = _feed(CycleCounter(), 100, vel=lambda i: rng.uniform(-1, 1)).report()
-    estimated = _feed(CycleCounter(), 1800, pos=_ramp).report()
+    estimated = _feed(CycleCounter(), 1800, pos=_ramp, pos2=lambda i: 2 * _ramp(i) + 5).report()
 
     assert CYCLE_TARGET == 10
     assert cycle_warning(enough) is None
@@ -333,6 +340,7 @@ _MIN_PERIODS = 3            # 수집 시간이 주기의 3배는 되어야 한�
 _MIN_PEAK = 0.3
 _MIN_PROMINENCE = 0.1
 _AGREEMENT = 0.2            # 태그들이 구한 주기가 서로 20% 안에서 맞아야 한다
+_MIN_AGREEING_TAGS = 2      # 한 태그만의 주기는 믿지 않는다(run4: 한 태그가 3.5초짜리 가짜 주기를 냈다)
 _MAX_PERIOD_TAGS = 8
 
 
@@ -514,7 +522,7 @@ class CycleCounter:
             return None
         middle = statistics.median(periods)
         agreeing = [p for p in periods if abs(p - middle) <= _AGREEMENT * middle]
-        if len(agreeing) * 2 < len(periods):
+        if len(agreeing) < _MIN_AGREEING_TAGS or len(agreeing) * 2 < len(periods):
             return None
         period = statistics.median(agreeing)
         return period if self.duration_seconds >= _MIN_PERIODS * period else None
@@ -3414,6 +3422,7 @@ from jetson_app.studio.controller import StudioController
 from studio_fakes import SourceFactory
 
 RUN3 = Path(__file__).resolve().parents[2] / "JSONData" / "run3"
+RUN4 = Path(__file__).resolve().parents[2] / "JSONData" / "run4"
 TAGS = [
     "NX5_AxisData:AxX_Act_Pos",
     "NX5_AxisData:AxZ_Act_Pos",
@@ -3429,6 +3438,7 @@ CONNECTION = {
     "subscribe_topics": ["dx1/AxisData", "dx1/ProcStart"],
 }
 needs_data = pytest.mark.skipif(not RUN3.is_dir(), reason="JSONData/run3 이 없는 체크아웃에서는 건너뜁니다")
+needs_run4 = pytest.mark.skipif(not RUN4.is_dir(), reason="JSONData/run4 가 없는 체크아웃에서는 건너뜁니다")
 
 
 class FakeIO:
@@ -3476,6 +3486,21 @@ def test_without_a_cycle_signal_the_period_estimate_still_finds_about_ten_cycles
 
     assert cycles["method"] == "period" and cycles["exact"] is False
     assert 6 <= cycles["cycles"] <= 14, cycles["message"]
+
+
+@needs_run4
+def test_a_spurious_period_from_a_single_tag_is_not_reported_as_cycles(tmp_path):
+    # run4에서는 AxZ_Act_Vel 한 태그만 3.5초짜리 가짜 주기(약 680사이클)를 냈다.
+    only_axes = tmp_path / "axes_only"
+    only_axes.mkdir()
+    shutil.copy2(RUN4 / "DX_AxisData.json", only_axes / "DX_AxisData.json")
+    controller = StudioController(tmp_path / "ws", io=FakeIO(), source_factory=SourceFactory(), run_worker=False)
+    controller.save_connection(dict(CONNECTION, subscribe_topics=["dx1/AxisData"]))
+    controller.import_folder(str(only_axes))
+
+    cycles = controller.analyze(with_tags=False)["cycles"]
+
+    assert cycles["method"] == "none", cycles["message"]
 ```
 
 - [ ] **Step 2: 전체 테스트를 돌린다**

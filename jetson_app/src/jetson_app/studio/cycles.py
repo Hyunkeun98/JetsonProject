@@ -23,6 +23,7 @@ _MIN_PERIODS = 3            # 수집 시간이 주기의 3배는 되어야 한�
 _MIN_PEAK = 0.3
 _MIN_PROMINENCE = 0.1
 _AGREEMENT = 0.2            # 태그들이 구한 주기가 서로 20% 안에서 맞아야 한다
+_MIN_AGREEING_TAGS = 2      # 한 태그만의 주기는 믿지 않는다(run4: 한 태그가 3.5초짜리 가짜 주기를 냈다)
 _MAX_PERIOD_TAGS = 8
 
 
@@ -204,7 +205,7 @@ class CycleCounter:
             return None
         middle = statistics.median(periods)
         agreeing = [p for p in periods if abs(p - middle) <= _AGREEMENT * middle]
-        if len(agreeing) * 2 < len(periods):
+        if len(agreeing) < _MIN_AGREEING_TAGS or len(agreeing) * 2 < len(periods):
             return None
         period = statistics.median(agreeing)
         return period if self.duration_seconds >= _MIN_PERIODS * period else None

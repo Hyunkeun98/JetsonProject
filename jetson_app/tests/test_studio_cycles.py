@@ -60,13 +60,20 @@ def test_a_single_edge_is_not_a_cycle():
 
 def test_period_is_estimated_from_repeating_motion_when_there_is_no_cycle_signal():
     rng = random.Random(7)
-    counter = _feed(CycleCounter(), 3000, pos=_ramp, vel=lambda i: rng.uniform(-1, 1))
+    counter = _feed(CycleCounter(), 3000, pos=_ramp, pos2=lambda i: 2 * _ramp(i) + 5, vel=lambda i: rng.uniform(-1, 1))
 
     report = counter.report()
 
     assert report.method == "period" and report.exact is False and report.tag is None
     assert 28 <= report.period_seconds <= 32
     assert 9 <= report.cycles <= 11
+
+
+def test_a_period_found_in_only_one_tag_is_not_trusted():
+    rng = random.Random(7)
+    counter = _feed(CycleCounter(), 3000, pos=_ramp, vel=lambda i: rng.uniform(-1, 1))
+
+    assert counter.report().method == "none"
 
 
 def test_noise_without_any_repetition_gives_no_cycle_count():
@@ -90,7 +97,7 @@ def test_warning_only_below_ten_cycles_and_it_says_when_the_number_is_an_estimat
     few = _feed(CycleCounter(), 600, U0=lambda i: 1 if i % 100 >= 90 else 0).report()
     rng = random.Random(5)
     unknown = _feed(CycleCounter(), 100, vel=lambda i: rng.uniform(-1, 1)).report()
-    estimated = _feed(CycleCounter(), 1800, pos=_ramp).report()
+    estimated = _feed(CycleCounter(), 1800, pos=_ramp, pos2=lambda i: 2 * _ramp(i) + 5).report()
 
     assert CYCLE_TARGET == 10
     assert cycle_warning(enough) is None
