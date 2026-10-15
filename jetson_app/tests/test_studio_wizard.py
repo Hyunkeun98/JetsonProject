@@ -33,14 +33,12 @@ def _write_data(directory, seconds=300):
             f.write(json.dumps({"records": [record]}) + "\n")
 
 
-def _form(**overrides):
+def _connection(**overrides):
     form = {
         "equipment_id": "nx5",
         "host": "localhost",
         "port": 1883,
         "subscribe_topics": ["dx1/AxisData"],
-        "tags": ["m:pos"],
-        "min_samples": 200,
     }
     form.update(overrides)
     return form
@@ -70,29 +68,24 @@ def test_analyze_reports_a_missing_folder_as_studio_error(tmp_path):
         wizard.analyze(str(tmp_path / "nope"))
 
 
-def test_save_config_writes_a_valid_deviation_config_and_settings(tmp_path):
-    config = wizard.save_config(tmp_path, _form())
+def test_save_connection_persists_and_is_restored(tmp_path):
+    saved = wizard.save_connection(tmp_path, _connection(subscribe_topics=["dx1/AxisData", " dx1/ProcStart "]))
 
-    assert config.equipment_id == "nx5"
-    assert config.deviation is not None and config.deviation.signals[0].tag == "m:pos"
-    assert config.tags == () and config.calibration.min_samples == 200
-    assert (tmp_path / "configs" / "nx5.yaml").exists()
-    assert wizard.load_settings(tmp_path) == {"config": "nx5.yaml", "host": "localhost", "port": 1883}
-
-
-def test_saved_form_restores_what_was_entered(tmp_path):
-    wizard.save_config(tmp_path, _form(tags=["m:pos", "m:pos2"]))
-
-    form = wizard.saved_form(tmp_path)
-
-    assert form["equipment_id"] == "nx5" and form["host"] == "localhost" and form["port"] == 1883
-    assert form["subscribe_topics"] == ["dx1/AxisData"]
-    assert form["tags"] == ["m:pos", "m:pos2"] and form["min_samples"] == 200
+    assert saved["topics"] == ["dx1/AxisData", "dx1/ProcStart"]
+    assert wizard.load_settings(tmp_path) == {
+        "equipment_id": "nx5", "host": "localhost", "port": 1883, "topics": ["dx1/AxisData", "dx1/ProcStart"],
+    }
+    assert wizard.saved_connection(tmp_path) == {
+        "equipment_id": "nx5", "host": "localhost", "port": 1883,
+        "subscribe_topics": ["dx1/AxisData", "dx1/ProcStart"],
+    }
 
 
-def test_saved_form_is_empty_before_anything_is_saved(tmp_path):
-    assert wizard.saved_form(tmp_path) == {}
+def test_nothing_is_saved_before_the_connection_is_entered(tmp_path):
     assert wizard.load_settings(tmp_path) is None
+    assert wizard.saved_connection(tmp_path) == {}
+    assert wizard.load_config(tmp_path) is None
+    assert wizard.saved_tags(tmp_path) == []
 
 
 @pytest.mark.parametrize(
@@ -105,13 +98,43 @@ def test_saved_form_is_empty_before_anything_is_saved(tmp_path):
         ({"port": 0}, "포트"),
         ({"port": "abc"}, "포트"),
         ({"subscribe_topics": []}, "토픽"),
-        ({"tags": []}, "태그"),
-        ({"min_samples": 0}, "수집"),
     ],
 )
-def test_save_config_rejects_bad_input_without_writing_anything(tmp_path, overrides, message):
+def test_save_connection_rejects_bad_input_without_writing(tmp_path, overrides, message):
     with pytest.raises(StudioError, match=message):
-        wizard.save_config(tmp_path, _form(**overrides))
+        wizard.save_connection(tmp_path, _connection(**overrides))
+
+    assert wizard.load_settings(tmp_path) is None
+
+
+def test_a_hand_broken_settings_file_is_ignored(tmp_path):
+    (tmp_path / "studio.json").write_text('{"equipment_id": "../x", "host": "h", "port": 1, "topics": ["t"]}')
+
+    assert wizard.load_settings(tmp_path) is None
+
+
+def test_save_config_needs_the_connection_first(tmp_path):
+    with pytest.raises(StudioError, match="연결 정보"):
+        wizard.save_config(tmp_path, ["m:pos"])
+
+
+def test_save_config_writes_a_valid_deviation_config(tmp_path):
+    wizard.save_connection(tmp_path, _connection(subscribe_topics=["dx1/AxisData", "dx1/ProcStart"]))
+
+    config = wizard.save_config(tmp_path, ["m:pos", "m:pos2", "m:pos"])
+
+    assert config.equipment_id == "nx5" and config.tags == ()
+    assert [s.tag for s in config.deviation.signals] == ["m:pos", "m:pos2"]
+    assert list(config.subscribe_topics) == ["dx1/AxisData", "dx1/ProcStart"]
+    assert (tmp_path / "configs" / "nx5.yaml").exists()
+    assert wizard.saved_tags(tmp_path) == ["m:pos", "m:pos2"]
+    assert wizard.load_config(tmp_path).equipment_id == "nx5"
+
+
+def test_save_config_rejects_no_tags_without_writing(tmp_path):
+    wizard.save_connection(tmp_path, _connection())
+
+    with pytest.raises(StudioError, match="태그"):
+        wizard.save_config(tmp_path, [])
 
     assert not (tmp_path / "configs").exists() or not list((tmp_path / "configs").iterdir())
-    assert wizard.load_settings(tmp_path) is None
