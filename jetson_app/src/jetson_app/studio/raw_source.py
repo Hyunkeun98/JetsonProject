@@ -19,13 +19,19 @@ class RawSource:
                 print(f"[studio] MQTT 연결 실패 (rc={rc}) — 브로커 인증/ACL 설정을 확인하세요")
                 return
             for topic in topics:
-                c.subscribe(topic, qos=1)
+                try:
+                    c.subscribe(topic, qos=1)
+                except ValueError as e:
+                    print(f"[studio] 구독할 수 없는 토픽을 건너뜁니다({topic}): {e}")
 
         def on_disconnect(c, userdata, rc):
             self._connected = False
 
         def on_message(c, userdata, msg):
-            on_payload(msg.topic, msg.payload)
+            try:
+                on_payload(msg.topic, msg.payload)
+            except Exception as e:                      # 예외가 paho 스레드를 죽이면 수신이 조용히 멈춘다
+                print(f"[studio] 받은 메시지를 처리하지 못했습니다({msg.topic}): {e!r}")
 
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect

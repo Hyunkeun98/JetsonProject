@@ -212,6 +212,7 @@ function renderCycles(cycles) {
   warning.hidden = !cycles.warning;
 }
 async function runAnalyze(withTags) {
+  $("cycle-info").textContent = "분석 중입니다. 데이터가 크면 시간이 걸립니다…";
   const result = await api("/api/analyze", { cycle_tag: $("cycle-tag").value, with_tags: withTags });
   if (result.tags) renderTags(result.tags);
   renderCycles(result.cycles);
@@ -250,7 +251,7 @@ function renderCollect(c) {
     parts.push(fmtDuration(c.seconds), "수신 " + c.messages + "건", fmtBytes(c.bytes) + " / " + fmtBytes(c.limit_bytes));
   }
   $("collect-info").textContent = parts.join(" · ");
-  $("collect-cycles").textContent = c.cycles ? c.cycles.message : "";
+  $("collect-cycles").textContent = c.cycles ? c.cycles.message : (c.counting ? "사이클 수를 세는 중입니다(데이터가 크면 시간이 걸립니다)…" : "");
 }
 
 function render(s) {
@@ -293,15 +294,20 @@ function render(s) {
   if (!control) stateMessage = { text: "조작 기능이 꺼져 있습니다(읽기 전용). 이 장비에서 열거나 --token을 지정해 다시 시작하세요.", warn: true };
   else if (s.error) stateMessage = { text: s.error, warn: false };
   else if (c.no_data) stateMessage = { text: "30초 넘게 데이터가 들어오지 않습니다. 토픽 이름과 DX1 발행 상태를 확인하세요.", warn: true };
+  else if (c.ended_reason === "error" && !c.active) stateMessage = { text: "수집 파일을 쓰지 못해 수집이 멈췄습니다. 디스크 공간과 폴더 권한을 확인하세요.", warn: false };
   else if (c.ended_reason === "size" && !c.active) stateMessage = { text: "수집이 크기 상한(1GB)에 닿아 자동으로 끝났습니다.", warn: true };
   else if (c.interrupted) stateMessage = { text: "이전 수집이 중간에 끊겼습니다(앱이 꺼졌을 수 있습니다). 그때까지 모인 데이터는 남아 있습니다.", warn: true };
   else if (p && p.expired && !p.active) stateMessage = { text: "시험이 5분이 지나 자동으로 끝났습니다.", warn: true };
   else stateMessage = null;
   showBanner();
 }
+let refreshing = false;
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
   try { render(await api("/api/state")); connError = ""; }
   catch (e) { connError = e.message; }
+  finally { refreshing = false; }
   showBanner();
 }
 
@@ -316,7 +322,10 @@ $("btn-probe-stop").onclick = () => act(() => api("/api/probe/stop", {}));
 $("btn-collect-start").onclick = () => act(() => api("/api/collect/start", {}));
 $("btn-collect-stop").onclick = () => act(() => api("/api/collect/stop", {}));
 $("btn-discard").onclick = () => act(() => api("/api/collect/discard", {}));
-$("btn-import").onclick = () => act(() => api("/api/collect/import", { data_dir: $("import_dir").value }));
+$("btn-import").onclick = () => act(async () => {
+  await api("/api/collect/import", { data_dir: $("import_dir").value });
+  analysisShown = false;
+});
 $("btn-analyze").onclick = () => act(() => runAnalyze(true));
 $("cycle-tag").onchange = () => act(() => runAnalyze(false));
 $("tags").onchange = () => { if (lastState) render(lastState); };

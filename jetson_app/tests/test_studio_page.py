@@ -51,4 +51,20 @@ def test_state_banner_is_cleared_when_its_condition_goes_away():
     html = _html()
 
     assert "function showBanner" in html and "stateMessage" in html
-    assert 'banner("")' not in html.split("function render(s)")[1].split("async function refresh")[0]
+    render = html.split("function render(s)")[1].split("async function refresh")[0]
+    assert "stateMessage = null" in render                     # 어떤 안내 조건도 맞지 않으면 안내를 지운다
+    assert render.count("stateMessage = {") >= 5
+
+
+def test_polling_does_not_pile_up_requests_and_import_triggers_a_fresh_analysis():
+    html = _html()
+
+    assert "let refreshing = false" in html and "if (refreshing) return" in html
+    import_handler = html.split('$("btn-import").onclick')[1].split('$("btn-analyze")')[0]
+    assert "analysisShown = false" in import_handler
+
+
+def test_page_reports_a_collection_that_stopped_because_the_file_could_not_be_written():
+    html = _html()
+
+    assert 'c.ended_reason === "error"' in html and "counting" in html

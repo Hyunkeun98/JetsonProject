@@ -122,3 +122,44 @@ def test_probe_keeps_only_the_last_message_text_bounded():
     source.emit(b'{"records":[{"timestamp":"x","pos":1}]}' + b" " * 5000)
 
     assert len(session.snapshot()["last_message"]) <= 2000
+
+
+# --- 리뷰 반영 -----------------------------------------------------------------------------------
+
+
+def test_probe_ignores_payloads_it_cannot_parse():
+    session, source, _ = _probe()
+    session.start()
+
+    source.emit(b'{"records":[{"timestamp":"x","big":' + b"9" * 400 + b"}]}")
+    source.emit(b"[" * 100000)
+    source.emit(payload(0, pos=1.0))
+
+    info = session.snapshot()
+    assert info["messages"] == 3 and info["tags"] == ["pos"]
+
+
+def test_probe_keeps_its_arrival_list_short_even_when_nobody_polls():
+    session, source, now = _probe()
+    session.start()
+
+    for i in range(1000):
+        now[0] = i * 0.1
+        source.emit(payload(i, pos=1.0))
+
+    assert len(session._arrivals) <= 55
+
+
+def test_raw_source_survives_a_failing_callback_and_a_bad_topic_filter(monkeypatch):
+    client = FakeClient()
+    monkeypatch.setattr("paho.mqtt.client.Client", lambda: client)
+
+    def explode(topic, data):
+        raise RuntimeError("boom")
+
+    source = RawSource()
+    source.connect("broker", 1883, ["dx1/#/Axis"], explode)
+    client.subscribe = lambda topic, qos=0: (_ for _ in ()).throw(ValueError("bad topic"))
+
+    client.on_connect(client, None, {}, 0)                        # 던지지 않는다
+    client.on_message(client, None, SimpleNamespace(topic="t", payload=b"{}"))   # 던지지 않는다

@@ -60,7 +60,11 @@ class StudioServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
-                server._get(self)
+                try:
+                    server._get(self)
+                except Exception as e:
+                    print(f"[studio] 조회 처리 중 오류: {e!r}")
+                    server._send_json(self, 500, {"error": "내부 오류가 났습니다. 콘솔 로그를 확인하세요."})
 
             def do_POST(self):
                 server._post(self)

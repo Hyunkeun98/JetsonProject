@@ -112,3 +112,45 @@ def test_scan_directory_reads_data_files_only(tmp_path):
     (tmp_path / "capture.meta").write_text('{"x": 1}', encoding="utf-8")
 
     assert scan_directory(tmp_path).report().cycles == 12
+
+
+# --- 리뷰 반영: 하트비트·업타임을 사이클로 오인하지 않는다, 이상한 payload에도 죽지 않는다 ---------------
+
+
+def test_a_fast_heartbeat_bit_is_not_a_cycle_signal_and_does_not_hide_the_real_period():
+    counter = _feed(
+        CycleCounter(), 3000,
+        alive=lambda i: (i // 10) % 2,                        # 1초마다 뒤집히는 PLC 생존 비트
+        pos=_ramp, pos2=lambda i: 2 * _ramp(i) + 5,
+    )
+
+    report = counter.report()
+
+    assert report.candidates == ()
+    assert report.method == "period" and 9 <= report.cycles <= 11
+
+
+def test_an_uptime_counter_is_not_a_cycle_signal():
+    counter = _feed(CycleCounter(), 3000, uptime=lambda i: i // 10)       # 1초마다 1씩 느는 정수
+
+    assert counter.report().method == "none"
+
+
+def test_values_that_cannot_be_numbers_do_not_break_counting():
+    counter = CycleCounter()
+    huge = b'{"records":[{"timestamp":"2026-08-04T00:00:00.000000000+0000","x":' + b"9" * 400 + b"}]}"
+
+    counter.feed_payload(huge)
+    counter.feed_payload(b"[" * 100000)                        # 너무 깊게 중첩된 JSON
+    counter.feed_payload(b"\xff\xfe not json")
+    counter.feed_payload(payload(1, ok=1.0))
+
+    assert counter.report().method == "none"
+
+
+def test_scan_directory_skips_bad_lines(tmp_path):
+    good = [payload(i, U0=1 if i % 100 >= 90 else 0) for i in range(1200)]
+    bad = [b"[" * 100000, b"\xff\xfe", b'{"records":[{"timestamp":"2026-08-04T00:00:00.000000000+0000","x":' + b"9" * 400 + b"}]}"]
+    (tmp_path / "a.jsonl").write_bytes(b"\n".join(bad[:1] + good[:600] + bad[1:] + good[600:]) + b"\n")
+
+    assert scan_directory(tmp_path).report().cycles == 12

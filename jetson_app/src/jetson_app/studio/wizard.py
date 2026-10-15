@@ -47,6 +47,19 @@ def analyze(data_dir: str) -> dict:
 # --- 1단계: 연결 정보 -------------------------------------------------------------------------
 
 
+def _check_topic_filter(topic: str) -> None:
+    """MQTT 토픽 필터 문법: '#'는 마지막 단계에 혼자, '+'는 한 단계 전체여야 한다."""
+    levels = topic.split("/")
+    bad = "\x00" in topic or len(topic.encode("utf-8")) > 65535
+    for index, level in enumerate(levels):
+        if "#" in level and (level != "#" or index != len(levels) - 1):
+            bad = True
+        if "+" in level and level != "+":
+            bad = True
+    if bad:
+        raise StudioError(f"토픽 '{topic}'은 올바른 MQTT 토픽이 아닙니다('#'는 마지막에 혼자, '+'는 한 단계 전체여야 합니다).")
+
+
 def _clean_connection(form: dict) -> dict:
     equipment_id = str(form.get("equipment_id", "")).strip()
     if not _EQUIPMENT_ID.match(equipment_id):
@@ -62,9 +75,14 @@ def _clean_connection(form: dict) -> dict:
         raise StudioError("포트는 1~65535 사이의 숫자여야 합니다.") from None
     if not 1 <= port <= 65535:
         raise StudioError("포트는 1~65535 사이의 숫자여야 합니다.")
-    topics = [str(t).strip() for t in form.get("subscribe_topics") or [] if str(t).strip()]
+    raw_topics = form.get("subscribe_topics") or []
+    if not isinstance(raw_topics, list):
+        raise StudioError("구독 토픽은 목록으로 보내야 합니다(쉼표로 구분해 적으세요).")
+    topics = [str(t).strip() for t in raw_topics if str(t).strip()]
     if not topics:
         raise StudioError("구독할 토픽을 하나 이상 입력하세요(예: dx1/AxisData).")
+    for topic in topics:
+        _check_topic_filter(topic)
     return {"equipment_id": equipment_id, "host": host, "port": port, "topics": topics}
 
 

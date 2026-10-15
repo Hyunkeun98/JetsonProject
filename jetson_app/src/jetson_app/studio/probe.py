@@ -60,13 +60,18 @@ class ProbeSession:
             now = self._clock()
             self._messages += 1
             self._arrivals.append(now)
+            while self._arrivals and now - self._arrivals[0] > RATE_WINDOW_SECONDS:
+                self._arrivals.popleft()               # 화면이 안 떠 있어도 기록이 끝없이 늘지 않게 한다
             self._last_rx = now
             self._last_message = payload[:LAST_MESSAGE_CHARS].decode("utf-8", errors="replace")
             self._seen_topics.add(topic)
-            for record in iter_records(payload):
-                for key, raw in record.items():
-                    if key != "timestamp" and numeric_value(raw) is not None and len(self._tags) < MAX_TAGS:
-                        self._tags.add(key)
+            try:
+                for record in iter_records(payload):
+                    for key, raw in record.items():
+                        if key != "timestamp" and numeric_value(raw) is not None and len(self._tags) < MAX_TAGS:
+                            self._tags.add(key)
+            except Exception as e:                     # 이상한 payload 하나가 수신 스레드를 죽이지 않게 한다
+                print(f"[studio] 시험: 읽을 수 없는 payload를 건너뜁니다: {e!r}")
 
     def snapshot(self) -> dict:
         with self._lock:

@@ -278,3 +278,33 @@ def test_shutdown_closes_everything_and_tolerates_being_called_twice(tmp_path):
 
     assert factory.last.connected is False and controller.state()["collect"]["active"] is False
     json.dumps(controller.state())                              # 상태는 항상 JSON으로 보낼 수 있어야 한다
+
+
+# --- 리뷰 반영 -----------------------------------------------------------------------------------
+
+
+def test_analysis_in_progress_blocks_collect_import_discard_and_train(tmp_path):
+    controller, factory, _ = _controller(tmp_path)
+    controller.save_connection(CONNECTION)
+    _collect(controller, factory, steps=50)
+    controller._analyzing = 1                                  # 분석이 도는 중인 상태를 흉내 낸다
+
+    state = controller.state()
+    assert state["analyzing"] is True
+    assert not any(state["can"][name] for name in ("collect_start", "discard", "import", "train", "save_connection"))
+    for call in (controller.collect_start, controller.discard, lambda: controller.import_folder("x"),
+                 lambda: controller.train(["pos"])):
+        with pytest.raises(StudioError, match="분석"):
+            call()
+
+
+def test_the_analysis_flag_is_cleared_even_when_the_analysis_fails(tmp_path, monkeypatch):
+    controller, factory, _ = _controller(tmp_path)
+    controller.save_connection(CONNECTION)
+    _collect(controller, factory, steps=50)
+    monkeypatch.setattr("jetson_app.studio.wizard.analyze", lambda path: (_ for _ in ()).throw(StudioError("boom")))
+
+    with pytest.raises(StudioError, match="boom"):
+        controller.analyze()
+
+    assert controller.state()["analyzing"] is False and controller.state()["can"]["collect_start"] is True

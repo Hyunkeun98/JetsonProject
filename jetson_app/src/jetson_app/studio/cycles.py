@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
 from operator import mul
@@ -25,6 +26,7 @@ _MIN_PROMINENCE = 0.1
 _AGREEMENT = 0.2            # 태그들이 구한 주기가 서로 20% 안에서 맞아야 한다
 _MIN_AGREEING_TAGS = 2      # 한 태그만의 주기는 믿지 않는다(run4: 한 태그가 3.5초짜리 가짜 주기를 냈다)
 _MAX_PERIOD_TAGS = 8
+_MIN_CYCLE_SECONDS = 3.0    # 사이클 신호의 변화 간격이 이보다 짧으면 하트비트·타이머로 본다
 
 
 @dataclass(frozen=True)
@@ -140,18 +142,14 @@ class CycleCounter:
                 tag.add(value)
 
     def candidates(self) -> list:
+        duration = self.duration_seconds
         found = []
         for name, tag in self._tags.items():
+            if tag.ups < 2 or duration / tag.ups < _MIN_CYCLE_SECONDS:
+                continue                          # 한 번만 바뀐 신호, 초 단위로 뒤집히는 하트비트·업타임
             if len(tag.distinct) == 2:
-                if tag.ups >= 2:
-                    found.append(CycleCandidate(name, "edge", tag.ups))
-            elif (
-                len(tag.distinct) >= 3
-                and tag.downs == 0
-                and tag.all_int
-                and tag.ups >= 2
-                and tag.ups * 2 <= tag.n          # 거의 매 샘플 바뀌는 정수(타이머)는 제외
-            ):
+                found.append(CycleCandidate(name, "edge", tag.ups))
+            elif len(tag.distinct) >= 3 and tag.downs == 0 and tag.all_int and tag.ups * 2 <= tag.n:
                 found.append(CycleCandidate(name, "counter", tag.ups))
         found.sort(key=lambda c: (c.cycles, 0 if c.method == "edge" else 1, c.tag))
         return found
@@ -193,7 +191,7 @@ class CycleCounter:
             mean = sum(x) / len(x)
             if mean <= 0.0:
                 continue
-            burstiness = statistics.pstdev(x) / mean      # 쉬었다 움직이길 되풀이하면 크고, 늘 떨리는 잡음이면 작다
+            burstiness = math.sqrt(sum((v - mean) ** 2 for v in x) / len(x)) / mean   # 쉬었다 움직이길 되풀이하면 크고, 늘 떨리는 잡음이면 작다
             series_by_tag.append((burstiness, [v - mean for v in x]))
         series_by_tag.sort(key=lambda item: item[0], reverse=True)
         periods = []
@@ -212,30 +210,45 @@ class CycleCounter:
 
 
 def _first_peak(x):
-    """평균을 뺀 열 x의 자기상관에서 처음 나오는 뚜렷한 봉우리의 지연(칸 수). 없으면 None."""
+    """평균을 뺀 열 x의 자기상관에서 처음 나오는 뚜렷한 봉우리의 지연(칸 수). 없으면 None.
+    필요한 지연까지만 계산하므로 봉우리가 일찍 나오면 빨리 끝난다."""
     max_lag = len(x) // _MIN_PERIODS
     if max_lag <= _MIN_LAG + 1:
         return None
     denominator = sum(map(mul, x, x))
     if denominator <= 0.0:
         return None
-    r = [1.0] + [sum(map(mul, x, x[k:])) / denominator for k in range(1, max_lag + 2)]
-    floor = min(r[1:_MIN_LAG])
+    r = [1.0]
+
+    def corr(k):
+        while len(r) <= k:
+            lag = len(r)
+            r.append(sum(map(mul, x, x[lag:])) / denominator)
+        return r[k]
+
+    floor = min(corr(k) for k in range(1, _MIN_LAG))
     for k in range(_MIN_LAG, max_lag + 1):
-        floor = min(floor, r[k - 1])
-        if r[k] >= _MIN_PEAK and r[k] - floor >= _MIN_PROMINENCE and r[k] > r[k - 1] and r[k] >= r[k + 1]:
+        floor = min(floor, corr(k - 1))
+        value = corr(k)
+        if value >= _MIN_PEAK and value - floor >= _MIN_PROMINENCE and value > corr(k - 1) and value >= corr(k + 1):
             return k
     return None
 
 
-def scan_directory(data_dir) -> CycleCounter:
-    """폴더의 *.json/*.jsonl(한 줄 = payload 하나)을 읽어 CycleCounter를 채운다."""
+def scan_directory(data_dir, cancelled=None) -> CycleCounter:
+    """폴더의 *.json/*.jsonl(한 줄 = payload 하나)을 읽어 CycleCounter를 채운다.
+    cancelled()가 True를 돌려주면 그 자리에서 멈추고 지금까지 센 것을 돌려준다(파일을 곧바로 놓는다)."""
     counter = CycleCounter()
     for path in sorted(Path(data_dir).iterdir()):
         if path.suffix not in (".json", ".jsonl"):
             continue
         with path.open("rb") as f:
-            for line in f:
+            for n, line in enumerate(f):
+                if cancelled is not None and n % 500 == 0 and cancelled():
+                    return counter
                 if line.strip():
-                    counter.feed_payload(line)
+                    try:
+                        counter.feed_payload(line)
+                    except Exception as e:           # 한 줄이 이상해도 나머지는 센다
+                        print(f"[studio] 사이클 세기: 읽을 수 없는 줄을 건너뜁니다({path.name}): {e!r}")
     return counter

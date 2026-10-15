@@ -183,3 +183,12 @@ def test_negative_content_length_is_rejected(open_server):
 
     assert conn.getresponse().status == 400
     conn.close()
+
+
+def test_a_failing_get_returns_a_generic_500_instead_of_dropping_the_connection(open_server, monkeypatch):
+    controller, server = open_server
+    monkeypatch.setattr(controller, "state", lambda: (_ for _ in ()).throw(OverflowError("boom")))
+
+    status, body, _ = _request(server, "GET", "/api/state")
+
+    assert status == 500 and "내부 오류" in body["error"] and "boom" not in body["error"]

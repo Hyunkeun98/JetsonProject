@@ -138,3 +138,17 @@ def test_save_config_rejects_no_tags_without_writing(tmp_path):
         wizard.save_config(tmp_path, [])
 
     assert not (tmp_path / "configs").exists() or not list((tmp_path / "configs").iterdir())
+
+
+@pytest.mark.parametrize("topics", [["dx1/#/Axis"], ["dx1#"], ["dx1/+x"], "dx1/AxisData", [""], ["a\x00b"]])
+def test_save_connection_rejects_topic_filters_the_broker_would_refuse(tmp_path, topics):
+    with pytest.raises(StudioError, match="토픽"):
+        wizard.save_connection(tmp_path, _connection(subscribe_topics=topics))
+
+    assert wizard.load_settings(tmp_path) is None
+
+
+def test_wildcard_topics_that_are_valid_are_accepted(tmp_path):
+    saved = wizard.save_connection(tmp_path, _connection(subscribe_topics=["dx1/#", "dx1/+/Axis"]))
+
+    assert saved["topics"] == ["dx1/#", "dx1/+/Axis"]

@@ -80,6 +80,7 @@ class StudioController:
         self._settings = None
         self._config = None
         self._training = False
+        self._analyzing = 0              # 분석(오래 걸릴 수 있음)이 도는 횟수
         self._train_thread = None
         self._error = None
         self._load_saved()
@@ -107,6 +108,8 @@ class StudioController:
             raise StudioError(f"감시 중에는 {action}할 수 없습니다. 먼저 감시를 중지하세요.")
         if self._training:
             raise StudioError(f"학습이 끝난 뒤에 {action}할 수 있습니다.")
+        if self._analyzing:
+            raise StudioError(f"분석이 끝난 뒤에 {action}할 수 있습니다.")
         if self._collector.state()["active"]:
             raise StudioError(f"수집 중에는 {action}할 수 없습니다. 먼저 수집을 종료하세요.")
 
@@ -132,8 +135,8 @@ class StudioController:
 
     def save_connection(self, form: dict) -> None:
         with self._lock:
-            if self._pipeline is not None or self._training or self._collector.state()["active"]:
-                raise StudioError("진행 중인 작업이 있습니다. 먼저 감시를 중지하거나 수집을 종료하세요.")
+            if self._pipeline is not None or self._training or self._analyzing or self._collector.state()["active"]:
+                raise StudioError("진행 중인 작업(감시, 학습, 분석, 수집)이 있습니다. 끝나거나 중지한 뒤에 저장하세요.")
             if self._probe is not None and self._probe.snapshot()["active"]:
                 raise StudioError("살펴보기가 진행 중입니다. 먼저 시험을 종료하세요.")
             wizard.save_connection(self._workspace, form)
@@ -216,11 +219,16 @@ class StudioController:
             if not self._collector.state()["has_data"]:
                 raise StudioError("수집한 데이터가 없습니다. 먼저 3단계에서 수집하세요.")
             directory = self._collector.current_dir
-        result = {}
-        if with_tags:
-            result.update(wizard.analyze(str(directory)))
-        result["cycles"] = self._collector.cycle_report(cycle_tag).to_dict()
-        return result
+            self._analyzing += 1                    # 분석하는 동안 수집·지우기·불러오기가 같은 파일을 건드리지 못하게 한다
+        try:
+            result = {}
+            if with_tags:
+                result.update(wizard.analyze(str(directory)))
+            result["cycles"] = self._collector.cycle_report(cycle_tag).to_dict()
+            return result
+        finally:
+            with self._lock:
+                self._analyzing -= 1
 
     # --- 5단계: 학습 ---------------------------------------------------------------------
 
@@ -357,9 +365,10 @@ class StudioController:
         running = self._pipeline is not None
         probing = bool(probe and probe["active"])
         collecting = collect["active"]
-        idle = settings and not (running or self._training or collecting)
+        analyzing = self._analyzing > 0
+        idle = settings and not (running or self._training or collecting or analyzing)
         return {
-            "save_connection": not (running or self._training or collecting or probing),
+            "save_connection": not (running or self._training or collecting or probing or analyzing),
             "probe_start": idle and not probing,
             "probe_stop": probing,
             "collect_start": idle,
@@ -401,6 +410,7 @@ class StudioController:
                 "probe": probe,
                 "collect": collect,
                 "training": self._training,
+                "analyzing": self._analyzing > 0,
                 "model_ready": ready,
                 "running": self._pipeline is not None,
                 "connected": bool(self._pipeline is not None and self._io.is_connected(self._pipeline)),
