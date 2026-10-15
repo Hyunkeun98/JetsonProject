@@ -19,7 +19,7 @@ h1 { font-size: 18px; margin: 4px 0 12px; }
 .steps span.now { color:#fff; background:var(--accent); border-color:var(--accent); }
 #banner { display:none; padding:8px 12px; margin-bottom:12px; border-radius:6px; border:1px solid var(--bad); color:var(--bad); background:var(--card); }
 #banner.warn { border-color:var(--warn); color:var(--warn); }
-.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:12px; opacity:.6; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:12px; opacity:.88; }
 .card.active { opacity:1; border-color:var(--accent); }
 .card h2 { font-size:15px; margin:0 0 8px; }
 label { display:block; margin:6px 0 2px; color:var(--sub); font-size:12px; }
@@ -234,7 +234,7 @@ function renderProbe(p) {
   }
   const parts = [p.active ? (p.connected ? "연결됨" : "연결 중이거나 끊김") : "종료됨",
     "수신 " + p.messages + "건", "초당 " + p.rate.toFixed(1) + "건"];
-  if (p.last_rx_age !== null) parts.push("마지막 수신 " + p.last_rx_age.toFixed(1) + "초 전");
+  if (p.active && p.last_rx_age !== null) parts.push("마지막 수신 " + p.last_rx_age.toFixed(1) + "초 전");
   if (p.topics.length) parts.push("토픽: " + p.topics.join(", "));
   info.textContent = parts.join(" · ");
   message.textContent = p.last_message;

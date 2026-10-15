@@ -26,7 +26,7 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
 | 임계값 추천 (`jetson-threshold`) | 구현 완료 |
 | 점수 그래프 (실시간 웹 `--web-port`, 저장 파일 `jetson-plot`) | 구현 완료 |
 | 기준값 이탈 점수 `deviation` (위치 신호의 충격 감지, GRU와 별개) | 구현 완료, 앱·replay 연결, 테스트 통과, 푸시 완료 |
-| 화면 `jetson-studio` (설정 마법사·수집·학습·감시, Windows exe, 토큰으로 원격 조작) | 구현 완료, 테스트 통과, exe 실행 확인. **실제 MQTT 연결은 미확인** |
+| 화면 `jetson-studio` (연결·살펴보기·전체 수집·태그 추천·학습·감시 6단계, Windows exe, 토큰으로 원격 조작) | 구현 완료, 테스트 통과, exe 실행 확인, 로컬 mosquitto로 실제 MQTT 경로 확인(run3 수집·학습, run4 감시 7/9). **DX1 실기 브로커(192.168.250.200)는 미확인** |
 | 후보 태그 추천 `jetson-deviation-suggest` | 구현 완료 (NX5에서 Pos 3개만 추천 확인) |
 | 태그 조합 선택 `jetson-select-tags`, 공정별 점수 `jetson-procscores` | 구현 완료 |
 | 실제 MQTT 연결로 `--web-port` 동작 확인 | **미확인** |
@@ -36,7 +36,7 @@ DX1(SpeeDBee Synapse)이 MQTT로 내보내는 JSON을 Jetson에서 받아 **설�
 | 상위 시스템(PLC/표시) 연동 | 미착수 |
 | 자동 시작/상태 확인 명령 | 미착수 |
 
-테스트는 488개이고 모두 통과합니다. 새 도구(replay/threshold/dashboard)는 별도의 독립 코드 리뷰를 아직 받지 않았습니다.
+테스트는 535개이고 모두 통과합니다. 새 도구(replay/threshold/dashboard)는 별도의 독립 코드 리뷰를 아직 받지 않았습니다.
 
 ## 3. 데이터 현황과 지금까지 알게 된 것
 
@@ -124,8 +124,12 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 | 파일 | 역할 |
 |---|---|
 | `score_history.py` | 최근 점수를 메모리 링 버퍼에 보관(웹용) |
-| `studio/controller.py` | `jetson-studio`의 제어 계층: 단계(설정·수집·학습·감시) 관리, 파이프라인 시작/중지, 학습 스레드. 새 계산 로직 없이 기존 부품을 호출 |
-| `studio/wizard.py` | 태그 분석 결과 정리, 설정 YAML 생성·검증·저장 |
+| `studio/controller.py` | `jetson-studio`의 제어 계층: 6단계 상태기계, 버튼별 허용 여부(`can`), 감시 파이프라인 시작/중지, 학습 스레드. 새 계산 로직 없이 기존 부품을 호출 |
+| `studio/raw_source.py`, `studio/probe.py` | 브로커 구독 어댑터와 2단계 "살펴보기"(저장 없음) |
+| `studio/collector.py` | 3단계 전체 수집: 원본 payload 저장, 크기 상한, archive, 폴더 불러오기, 중단된 수집본 표시 |
+| `studio/cycles.py`, `studio/payloads.py` | 사이클 세기(0/1 신호·카운터·주기 추정). 태그 이름을 가정하지 않는다 |
+| `studio/trainer.py` | 수집본으로 deviation 학습(파이프라인·torch 없이) |
+| `studio/wizard.py` | 연결 정보 저장, 태그 분석 결과 정리, 선택 태그로 설정 YAML 생성·검증·저장 |
 | `studio/server.py` | 화면과 JSON API(토큰, Host/Origin 검사, 본문 64KB 제한) |
 | `studio/cli.py`, `web/studio.html` | `jetson-studio` 진입점과 단일 HTML 화면 |
 | `engine_types.py`, `artifact_paths.py` | torch 없는 공용 타입과 경로 규칙(deviation 전용 구성이 torch 없이 import 되게 분리) |
@@ -161,7 +165,7 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 5. 실제 MQTT로 `--web-port` 동작 확인, 좁은 화면 레이아웃 확인.
 6. Jetson 실기에서 학습 시간 측정.
 7. replay/threshold/dashboard 독립 코드 리뷰.
-8. studio 확장: GRU 설정 화면, 재생 검증 탭, 파일 업로드, 저장된 태그 선택 복원.
+8. studio 확장: GRU 설정 화면, 재생 검증 탭, 수집 중 이상 구간 제외, 브로커 인증 입력, 수집 시간·사이클 수 도달 시 자동 종료.
 9. 자동 시작/상태 확인 명령, PLC/표시 연동.
 
 ## 9. 처음 시작하는 법

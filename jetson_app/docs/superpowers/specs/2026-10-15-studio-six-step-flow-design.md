@@ -83,16 +83,18 @@ C(문턱 넘김)는 사람이 문턱을 정해야 해서 이번에는 넣지 않
 | 메서드 | 경로 | 동작 |
 |---|---|---|
 | POST | `/api/connection` | `{equipment_id, host, port, topics}` 저장 |
-| POST/GET | `/api/probe/start`, `/api/probe/stop`, `/api/probe` | 시험 시작·종료·조회 |
+| POST | `/api/probe/start`, `/api/probe/stop` | 시험 시작·종료. 시험 상태는 `/api/state`의 `probe` |
 | POST | `/api/collect/start`, `/api/collect/stop`, `/api/collect/discard` | 수집 시작·종료·버리기 |
 | POST | `/api/collect/import` | `{data_dir}` 폴더를 수집본으로 불러오기(복사) |
-| GET | `/api/collect` | 수집 상태(경과, 건수, 크기, 사이클 수) |
 | POST | `/api/analyze` | 수집본으로 태그 추천 + 사이클 후보 |
 | POST | `/api/train` | `{tags, cycle_tag}`로 YAML 생성 후 학습 시작 |
 | POST | `/api/start`, `/api/stop` | 감시 시작·중지 |
 | GET | `/api/state` | 단계, 오류, 각 단계 요약 |
 
-기존 `/api/config`, `/api/recalibrate`는 새 흐름에 맞게 정리한다. `/api/scores`, `/api/meta`, `/dashboard`는 그대로다.
+기존 `/api/config`, `/api/recalibrate`는 새 흐름에 맞게 정리한다.
+
+구현에서 달라진 점: `GET /api/probe`, `GET /api/collect`는 한 번의 폴링으로 충분해서 `/api/state`의 `probe`, `collect`에 합쳤다. `/api/config`는 `/api/connection`, `/api/recalibrate`는 `/api/collect/discard`와 `/api/retrain`으로 나뉘었다. `/api/state`에는 버튼별 허용 여부 `can`이 들어 있고, 화면은 이것만 보고 버튼을 켠다.
+ `/api/scores`, `/api/meta`, `/dashboard`는 그대로다.
 
 ## 7. 저장 위치
 

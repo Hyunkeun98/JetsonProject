@@ -2994,7 +2994,7 @@ h1 { font-size: 18px; margin: 4px 0 12px; }
 .steps span.now { color:#fff; background:var(--accent); border-color:var(--accent); }
 #banner { display:none; padding:8px 12px; margin-bottom:12px; border-radius:6px; border:1px solid var(--bad); color:var(--bad); background:var(--card); }
 #banner.warn { border-color:var(--warn); color:var(--warn); }
-.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:12px; opacity:.6; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:12px; opacity:.88; }
 .card.active { opacity:1; border-color:var(--accent); }
 .card h2 { font-size:15px; margin:0 0 8px; }
 label { display:block; margin:6px 0 2px; color:var(--sub); font-size:12px; }
@@ -3209,7 +3209,7 @@ function renderProbe(p) {
   }
   const parts = [p.active ? (p.connected ? "연결됨" : "연결 중이거나 끊김") : "종료됨",
     "수신 " + p.messages + "건", "초당 " + p.rate.toFixed(1) + "건"];
-  if (p.last_rx_age !== null) parts.push("마지막 수신 " + p.last_rx_age.toFixed(1) + "초 전");
+  if (p.active && p.last_rx_age !== null) parts.push("마지막 수신 " + p.last_rx_age.toFixed(1) + "초 전");
   if (p.topics.length) parts.push("토픽: " + p.topics.join(", "));
   info.textContent = parts.join(" · ");
   message.textContent = p.last_message;
@@ -3414,10 +3414,13 @@ def test_whole_workflow_over_http(tmp_path):
 ```python
 """실제 NX5 데이터(JSONData/run3)로 6단계 흐름의 핵심을 확인한다. 데이터가 없는 체크아웃에서는 건너뛴다."""
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+from jetson_app.replay import load_records
+from jetson_app.segments import Segment
 from jetson_app.studio.controller import StudioController
 from studio_fakes import SourceFactory
 
@@ -3486,6 +3489,42 @@ def test_without_a_cycle_signal_the_period_estimate_still_finds_about_ten_cycles
 
     assert cycles["method"] == "period" and cycles["exact"] is False
     assert 6 <= cycles["cycles"] <= 14, cycles["message"]
+
+
+@pytest.mark.skipif(not (RUN3.is_dir() and RUN4.is_dir()), reason="JSONData/run3, run4 가 없는 체크아웃에서는 건너뜁니다")
+def test_run3_collection_then_run4_monitoring_detects_seven_of_nine_shocks(tmp_path):
+    """6단계 흐름으로 학습한 결과가 기존 실험(accept_deviation.py)과 같은 7/9 검출을 낸다.
+    기준: 라벨 시각을 -6.1초 보정(PC 시계 차이)하고 ±3초 창에서 해당 축의 알람을 찾는다."""
+    controller = StudioController(tmp_path, io=FakeIO(), source_factory=SourceFactory(), run_worker=False)
+    controller.save_connection(CONNECTION)
+    controller.import_folder(str(RUN3))
+    controller.train(TAGS)
+    controller.join_training(timeout=300)
+    assert controller.state()["stage"] == "MONITOR", controller.state()["error"]
+    controller.start()
+    everything = Segment(kind="eval", name="all", start_ns=0, end_ns=2**62)
+    for n, record in enumerate(load_records(RUN4, tuple(TAGS), (everything,))):
+        controller.feed_record(record)
+        if n % 200 == 0:
+            controller.pump()                      # 처리 큐 한도(10000)를 넘지 않게 계속 비운다
+    controller.pump()
+
+    labels = []
+    for line in (RUN4 / "batches.txt").read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] in ("axisxerror", "axisCVerror"):
+            stamp = parts[0]
+            labels.append((parts[1], datetime.fromisoformat(stamp[:26] + stamp[-6:]).timestamp() - 6.1))
+    axis = {"axisxerror": "axx_act_pos", "axisCVerror": "axcv_act_pos"}
+    alarms = [(t / 1000.0, name) for t, groups in controller.pipeline.history._rows
+              for name, (_, alarm, _) in groups.items() if alarm]
+
+    detected = sum(any(name == axis[kind] and t0 - 3 <= t <= t0 + 3 for t, name in alarms) for kind, t0 in labels)
+    far = [(t, name) for t, name in alarms
+           if not any(name == axis[kind] and t0 - 10 <= t <= t0 + 10 for kind, t0 in labels)]
+    assert len(labels) == 9
+    assert detected >= 7, detected
+    assert far == []                               # 라벨과 무관한 알람(정상 오탐)은 없다
 
 
 @needs_run4
