@@ -41,12 +41,20 @@ class StudioServer:
         self._studio_page = _STUDIO_PAGE.read_bytes()
         self._dashboard_page = render_dashboard({"mode": "live"}).encode("utf-8")
         self._post_routes = {
-            "/api/analyze": lambda body: controller.analyze(str(body.get("data_dir", ""))),
-            "/api/config": lambda body: controller.save_config(body),
+            "/api/connection": lambda body: controller.save_connection(body),
+            "/api/probe/start": lambda body: controller.probe_start(),
+            "/api/probe/stop": lambda body: controller.probe_stop(),
+            "/api/collect/start": lambda body: controller.collect_start(),
+            "/api/collect/stop": lambda body: controller.collect_stop(),
+            "/api/collect/discard": lambda body: controller.discard(),
+            "/api/collect/import": lambda body: controller.import_folder(_text(body, "data_dir")),
+            "/api/analyze": lambda body: controller.analyze(
+                _text(body, "cycle_tag", required=False) or None, with_tags=body.get("with_tags", True) is not False
+            ),
+            "/api/train": lambda body: controller.train(_text_list(body, "tags")),
             "/api/start": lambda body: controller.start(),
-            "/api/train": lambda body: controller.train(),
-            "/api/recalibrate": lambda body: controller.recalibrate(),
             "/api/stop": lambda body: controller.stop(),
+            "/api/retrain": lambda body: controller.retrain(),
         }
         server = self
 
@@ -100,8 +108,8 @@ class StudioServer:
             state["control_enabled"] = self._control_enabled
             state["token_required"] = self._token is not None
             self._send_json(h, 200, state)
-        elif url.path == "/api/config":
-            self._send_json(h, 200, c.form())
+        elif url.path == "/api/connection":
+            self._send_json(h, 200, c.connection())
         elif url.path == "/api/meta":
             self._send_json(h, 200, c.meta())
         elif url.path == "/api/scores":
@@ -178,6 +186,22 @@ class StudioServer:
         h.send_header("X-Content-Type-Options", "nosniff")
         h.end_headers()
         h.wfile.write(body)
+
+
+def _text(body: dict, key: str, required: bool = True) -> str:
+    value = body.get(key, "" if required else None)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise StudioError(f"'{key}'는 문자열이어야 합니다.")
+    return value
+
+
+def _text_list(body: dict, key: str) -> list:
+    value = body.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise StudioError(f"'{key}'는 문자열의 목록이어야 합니다.")
+    return value
 
 
 def _number(query: dict, key: str, default: float) -> float:
