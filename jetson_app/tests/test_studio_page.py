@@ -8,12 +8,16 @@ def _html():
     return PAGE.read_text(encoding="utf-8")
 
 
-def test_page_has_the_four_steps_and_main_controls():
+def test_page_has_the_six_steps_and_main_controls():
     html = _html()
 
-    for marker in ('data-step="1"', 'data-step="2"', 'data-step="3"', 'data-step="4"'):
-        assert marker in html
-    for control_id in ("btn-analyze", "btn-save", "btn-start", "btn-train", "btn-recalibrate", "btn-stop"):
+    for n in range(1, 7):
+        assert f'data-step="{n}"' in html
+    for control_id in (
+        "btn-save-connection", "btn-probe-start", "btn-probe-stop", "btn-collect-start", "btn-collect-stop",
+        "btn-discard", "btn-import", "btn-analyze", "btn-train", "btn-start", "btn-stop", "btn-retrain",
+        "cycle-tag", "train-warning",
+    ):
         assert f'id="{control_id}"' in html
 
 
@@ -25,11 +29,22 @@ def test_page_is_self_contained():
     assert "X-Studio-Token" in html and "/api/state" in html and "/dashboard" in html
 
 
-def test_page_lets_the_user_discard_collected_data_while_collecting():
+def test_buttons_follow_what_the_server_says_is_allowed():
+    html = _html()
+    render = html.split("function render(s)")[1].split("async function refresh")[0]
+
+    assert "s.can" in render
+    for api in ("/api/probe/start", "/api/collect/start", "/api/collect/import", "/api/analyze", "/api/train",
+                "/api/start", "/api/retrain", "/api/connection"):
+        assert api in html
+
+
+def test_page_explains_the_limits_the_user_must_know():
     html = _html()
 
-    assert 'id="btn-discard"' in html
-    assert "btn-discard" in html.split("function render(s)")[1]       # 수집 중에도 켜지는지 render가 다룬다
+    assert "10" in html and "사이클" in html                # 최소 수집량 안내
+    assert "축이 움직" in html                              # 멈춘 상태만 모으면 추천이 비는 이유
+    assert "1GB" in html                                    # 수집 상한 도달 안내
 
 
 def test_state_banner_is_cleared_when_its_condition_goes_away():

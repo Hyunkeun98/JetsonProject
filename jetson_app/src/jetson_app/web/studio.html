@@ -19,11 +19,11 @@ h1 { font-size: 18px; margin: 4px 0 12px; }
 .steps span.now { color:#fff; background:var(--accent); border-color:var(--accent); }
 #banner { display:none; padding:8px 12px; margin-bottom:12px; border-radius:6px; border:1px solid var(--bad); color:var(--bad); background:var(--card); }
 #banner.warn { border-color:var(--warn); color:var(--warn); }
-.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:12px; opacity:.55; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:12px; opacity:.6; }
 .card.active { opacity:1; border-color:var(--accent); }
 .card h2 { font-size:15px; margin:0 0 8px; }
 label { display:block; margin:6px 0 2px; color:var(--sub); font-size:12px; }
-input[type=text], input[type=number] { width:100%; max-width:420px; padding:6px 8px; border:1px solid var(--line); border-radius:6px;
+input[type=text], input[type=number], select { width:100%; max-width:420px; padding:6px 8px; border:1px solid var(--line); border-radius:6px;
   background:var(--bg); color:var(--ink); }
 .row { display:flex; gap:12px; flex-wrap:wrap; }
 .row > div { flex:1 1 200px; }
@@ -34,70 +34,93 @@ button:disabled { opacity:.4; cursor:not-allowed; }
 table { border-collapse:collapse; width:100%; font-size:12px; margin-top:8px; }
 th, td { border-bottom:1px solid var(--line); padding:4px 8px; text-align:left; white-space:nowrap; }
 td.reason { white-space:normal; color:var(--sub); }
-.bar { height:10px; background:var(--line); border-radius:6px; overflow:hidden; margin:8px 0 4px; }
-.bar > i { display:block; height:100%; width:0; background:var(--accent); }
 .hint { color:var(--sub); font-size:12px; }
+.info { margin-top:8px; }
+.warnbox { color:var(--warn); margin-top:8px; }
+pre { margin:8px 0 0; padding:8px; max-height:120px; overflow:auto; background:var(--bg); border:1px solid var(--line); border-radius:6px; font-size:11px; white-space:pre-wrap; word-break:break-all; }
 iframe { width:100%; height:520px; border:1px solid var(--line); border-radius:6px; background:var(--card); }
 </style>
 </head>
 <body>
 <main>
 <h1>jetson-studio</h1>
-<div class="steps" id="steps"><span data-s="1">1 설정</span><span data-s="2">2 수집</span><span data-s="3">3 학습</span><span data-s="4">4 감시</span></div>
+<div class="steps" id="steps"><span data-s="1">1 연결</span><span data-s="2">2 살펴보기</span><span data-s="3">3 전체 수집</span><span data-s="4">4 태그 추천</span><span data-s="5">5 학습</span><span data-s="6">6 감시</span></div>
 <div id="banner"></div>
 
 <section class="card" data-step="1">
-  <h2>1. 설정</h2>
+  <h2>1. 연결</h2>
   <div class="row">
     <div><label for="equipment_id">장비 이름 (영문, 숫자, _ -)</label><input type="text" id="equipment_id" placeholder="nx5"></div>
-    <div><label for="subscribe_topics">구독 토픽 (쉼표로 구분)</label><input type="text" id="subscribe_topics" placeholder="dx1/AxisData"></div>
+    <div><label for="subscribe_topics">구독 토픽 (쉼표로 구분)</label><input type="text" id="subscribe_topics" placeholder="dx1/AxisData, dx1/ProcStart"></div>
   </div>
   <div class="row">
     <div><label for="host">브로커 주소</label><input type="text" id="host" value="localhost"></div>
     <div><label for="port">포트</label><input type="number" id="port" value="1883"></div>
-    <div><label for="min_samples">학습에 필요한 수집 개수 (100ms당 1개)</label><input type="number" id="min_samples" value="3000"></div>
   </div>
-  <label for="data_dir">정상 데이터 폴더 (이 장비에 저장된 DX1 JSON, 태그 추천용)</label>
-  <input type="text" id="data_dir" placeholder="C:\data\normal">
-  <div><button id="btn-analyze" class="secondary">태그 분석</button></div>
-  <div class="table"><table id="tags" hidden>
-    <thead><tr><th>선택</th><th>태그</th><th>종류</th><th>대기잡음</th><th>범위/잡음</th><th>판정과 이유</th></tr></thead><tbody></tbody>
-  </table></div>
-  <p class="hint">추천 태그는 평소 조용하고 값의 범위가 넓은 신호(예: 서보 위치)입니다. 추천을 따르면 충격 같은 순간적인 이탈을 잡습니다.</p>
-  <button id="btn-save">설정 저장</button>
+  <p class="hint">사이클 수를 정확히 세려면 사이클 시작 신호나 카운터가 있는 토픽도 같이 적으세요. 없으면 움직임의 반복으로 추정합니다.</p>
+  <button id="btn-save-connection">연결 정보 저장</button>
 </section>
 
 <section class="card" data-step="2">
-  <h2>2. 정상 데이터 수집</h2>
-  <p class="hint">브로커에 연결해 정상 운전 데이터를 모읍니다. 정상 사이클이 여러 번(가능하면 10회 이상) 들어가야 기준이 안정됩니다.</p>
-  <div id="connection" class="hint"></div>
-  <div class="bar"><i id="progress"></i></div>
-  <div id="progress-text" class="hint"></div>
-  <button id="btn-start">연결하고 수집 시작</button>
-  <button id="btn-discard" class="secondary">수집한 데이터 지우고 다시 시작</button>
-  <button id="btn-stop" class="secondary">중지</button>
+  <h2>2. 살펴보기</h2>
+  <p class="hint">토픽으로 데이터가 들어오는지만 확인합니다. 아무것도 저장하지 않고, 끝내면 연결을 끊습니다(5분 뒤 자동 종료).</p>
+  <button id="btn-probe-start">시험 시작</button>
+  <button id="btn-probe-stop" class="secondary">시험 종료</button>
+  <div id="probe-info" class="info"></div>
+  <pre id="probe-message" hidden></pre>
+  <div id="probe-tags" class="hint"></div>
 </section>
 
 <section class="card" data-step="3">
-  <h2>3. 학습</h2>
-  <p class="hint">수집한 정상 데이터로 신호별 잡음 크기와 알람 기준을 계산합니다. 몇 초 걸립니다.</p>
+  <h2>3. 전체 수집</h2>
+  <p class="hint">정상으로 운전하는 동안 들어오는 데이터를 원본 그대로 모읍니다. 정상 사이클이 10회 이상 들어가야 기준이 안정됩니다.
+    수집하는 동안 축이 움직이는 사이클이 들어가야 태그를 추천할 수 있습니다(멈춘 상태만 모으면 추천이 비어 나옵니다).
+    이상 상황은 섞이지 않게 하세요. 수집은 1GB에 닿으면 자동으로 끝납니다.</p>
+  <button id="btn-collect-start">수집 시작</button>
+  <button id="btn-collect-stop" class="secondary">수집 종료</button>
+  <button id="btn-discard" class="secondary">수집한 데이터 지우기</button>
+  <div id="collect-info" class="info"></div>
+  <div id="collect-cycles" class="hint"></div>
+  <label for="import_dir">또는 이미 저장해 둔 데이터 폴더(DX1 JSON)를 수집 데이터로 불러오기</label>
+  <input type="text" id="import_dir" placeholder="C:\data\normal">
+  <button id="btn-import" class="secondary">폴더 불러오기</button>
+</section>
+
+<section class="card" data-step="4">
+  <h2>4. 태그 추천</h2>
+  <p class="hint">수집한 데이터로 점수에 쓸 태그를 추천합니다. 추천 태그는 평소 조용하고 값의 범위가 넓은 신호(예: 서보 위치)입니다.</p>
+  <button id="btn-analyze" class="secondary">태그 분석</button>
+  <div class="table"><table id="tags" hidden>
+    <thead><tr><th>선택</th><th>태그</th><th>종류</th><th>대기잡음</th><th>범위/잡음</th><th>판정과 이유</th></tr></thead><tbody></tbody>
+  </table></div>
+  <label for="cycle-tag">사이클 기준 신호</label>
+  <select id="cycle-tag"><option value="">자동 선택</option></select>
+  <div id="cycle-info" class="hint"></div>
+</section>
+
+<section class="card" data-step="5">
+  <h2>5. 학습</h2>
+  <p class="hint">고른 태그로 신호별 잡음 크기와 알람 기준을 계산합니다. 몇 초에서 몇 분 걸립니다.</p>
+  <div id="train-warning" class="warnbox" hidden></div>
   <button id="btn-train">학습 시작</button>
   <div class="table"><table id="signals" hidden>
     <thead><tr><th>신호</th><th>태그</th><th>대기잡음 σ</th><th>알람 기준</th><th>움직임 기준</th></tr></thead><tbody></tbody>
   </table></div>
 </section>
 
-<section class="card" data-step="4">
-  <h2>4. 감시</h2>
+<section class="card" data-step="6">
+  <h2>6. 감시</h2>
+  <button id="btn-start">감시 시작</button>
+  <button id="btn-stop" class="secondary">감시 중지</button>
+  <button id="btn-retrain" class="secondary">다시 학습 (4단계로)</button>
+  <div id="monitor-info" class="hint"></div>
   <iframe id="dash" title="점수 그래프"></iframe>
-  <div><button id="btn-recalibrate" class="secondary">처음부터 다시 수집</button></div>
 </section>
 </main>
 
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const STEP_OF = { SETUP: 1, READY: 2, COLLECTING: 2, TRAINING: 3, MONITORING: 4 };
 let token = "";
 try {
   token = new URLSearchParams(location.search).get("token") || sessionStorage.getItem("studioToken") || "";
@@ -143,6 +166,13 @@ function cell(row, text, cls) {
   return td;
 }
 const fmt = (v) => (v === null || v === undefined) ? "-" : Number(v).toPrecision(3);
+const fmtBytes = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : (n / 1024).toFixed(1) + " KB";
+function fmtDuration(seconds) {
+  const s = Math.round(seconds);
+  return Math.floor(s / 60) + "분 " + (s % 60) + "초";
+}
+
+let lastState = null, analysisShown = false;
 
 function renderTags(tags) {
   const table = $("tags"), body = table.querySelector("tbody");
@@ -163,6 +193,29 @@ function renderTags(tags) {
 function selectedTags() {
   return Array.from($("tags").querySelectorAll("input:checked")).map((b) => b.value);
 }
+function renderCycles(cycles) {
+  const select = $("cycle-tag"), keep = select.value;
+  select.replaceChildren();
+  const auto = document.createElement("option");
+  auto.value = ""; auto.textContent = "자동 선택";
+  select.appendChild(auto);
+  for (const c of cycles.candidates) {
+    const option = document.createElement("option");
+    option.value = c.tag;
+    option.textContent = c.tag + " (" + (c.method === "edge" ? "0/1 신호" : "카운터") + ", " + c.cycles + "사이클)";
+    select.appendChild(option);
+  }
+  select.value = Array.from(select.options).some((o) => o.value === keep) ? keep : "";
+  $("cycle-info").textContent = cycles.message;
+  const warning = $("train-warning");
+  warning.textContent = cycles.warning || "";
+  warning.hidden = !cycles.warning;
+}
+async function runAnalyze(withTags) {
+  const result = await api("/api/analyze", { cycle_tag: $("cycle-tag").value, with_tags: withTags });
+  if (result.tags) renderTags(result.tags);
+  renderCycles(result.cycles);
+}
 function renderSignals(signals) {
   const table = $("signals"), body = table.querySelector("tbody");
   body.replaceChildren();
@@ -173,10 +226,36 @@ function renderSignals(signals) {
   }
   table.hidden = signals.length === 0;
 }
+function renderProbe(p) {
+  const info = $("probe-info"), message = $("probe-message");
+  if (!p || (!p.active && p.messages === 0)) {
+    info.textContent = ""; message.hidden = true; $("probe-tags").textContent = "";
+    return;
+  }
+  const parts = [p.active ? (p.connected ? "연결됨" : "연결 중이거나 끊김") : "종료됨",
+    "수신 " + p.messages + "건", "초당 " + p.rate.toFixed(1) + "건"];
+  if (p.last_rx_age !== null) parts.push("마지막 수신 " + p.last_rx_age.toFixed(1) + "초 전");
+  if (p.topics.length) parts.push("토픽: " + p.topics.join(", "));
+  info.textContent = parts.join(" · ");
+  message.textContent = p.last_message;
+  message.hidden = !p.last_message;
+  const shown = p.tags.slice(0, 40).join(", ") + (p.tag_count > 40 ? " 외 " + (p.tag_count - 40) + "개" : "");
+  $("probe-tags").textContent = p.tag_count ? ("숫자 태그 " + p.tag_count + "개: " + shown) : "";
+}
+function renderCollect(c) {
+  const parts = [];
+  if (c.active) parts.push(c.connected ? "수집 중" : "수집 중(브로커 연결이 끊겼습니다. 자동으로 다시 연결합니다)");
+  else if (c.has_data) parts.push(c.interrupted ? "중단된 수집본" : "수집 완료");
+  if (c.has_data || c.active) {
+    parts.push(fmtDuration(c.seconds), "수신 " + c.messages + "건", fmtBytes(c.bytes) + " / " + fmtBytes(c.limit_bytes));
+  }
+  $("collect-info").textContent = parts.join(" · ");
+  $("collect-cycles").textContent = c.cycles ? c.cycles.message : "";
+}
 
-let dashLoaded = false;
 function render(s) {
-  const now = STEP_OF[s.stage];
+  lastState = s;
+  const now = s.step;
   document.querySelectorAll("#steps span").forEach((el) => {
     const n = Number(el.dataset.s);
     el.className = n < now ? "done" : (n === now ? "now" : "");
@@ -184,25 +263,39 @@ function render(s) {
   document.querySelectorAll(".card").forEach((el) => {
     el.classList.toggle("active", Number(el.dataset.step) === now);
   });
-  const control = s.control_enabled;
-  const running = s.stage === "COLLECTING" || s.stage === "TRAINING" || s.stage === "MONITORING";
-  $("btn-analyze").disabled = !control;
-  $("btn-save").disabled = !control || running;
-  $("btn-start").disabled = !control || s.stage !== "READY";
-  $("btn-stop").disabled = !control || !running || s.stage === "TRAINING";
-  $("btn-train").disabled = !control || s.stage !== "COLLECTING" || s.collected < s.required;
-  $("btn-recalibrate").disabled = !control || s.stage !== "MONITORING";
-  $("btn-discard").disabled = !control || s.stage !== "COLLECTING";
-  $("connection").textContent = running ? (s.connected ? "브로커 연결됨" : "브로커 연결이 끊겼습니다. 자동으로 다시 연결합니다.") : "연결 안 됨";
-  const pct = s.required > 0 ? Math.min(100, Math.round(100 * s.collected / s.required)) : 0;
-  $("progress").style.width = pct + "%";
-  $("progress-text").textContent = running ? (s.collected + " / " + s.required + " (" + pct + "%)") : "";
+  const control = s.control_enabled, can = s.can;
+  const enable = (id, allowed) => { $(id).disabled = !control || !allowed; };
+  enable("btn-save-connection", can.save_connection);
+  enable("btn-probe-start", can.probe_start);
+  enable("btn-probe-stop", can.probe_stop);
+  enable("btn-collect-start", can.collect_start);
+  enable("btn-collect-stop", can.collect_stop);
+  enable("btn-discard", can.discard);
+  enable("btn-import", can.import);
+  enable("btn-analyze", can.analyze);
+  enable("btn-train", can.train && selectedTags().length > 0);
+  enable("btn-start", can.start);
+  enable("btn-stop", can.stop);
+  enable("btn-retrain", can.retrain);
+  renderProbe(s.probe);
+  renderCollect(s.collect);
   renderSignals(s.signals);
-  if (s.stage === "MONITORING" && !dashLoaded) { $("dash").src = "/dashboard"; dashLoaded = true; }
-  if (s.stage !== "MONITORING") dashLoaded = false;
+  $("monitor-info").textContent = s.running ? (s.connected ? "감시 중 · 브로커 연결됨" : "감시 중 · 브로커 연결이 끊겼습니다. 자동으로 다시 연결합니다.")
+    : (s.model_ready ? "학습한 모델이 있습니다. 감시를 시작할 수 있습니다." : "");
+  if (s.running && !$("dash").getAttribute("src")) $("dash").src = "/dashboard";
+  if (!s.running) $("dash").removeAttribute("src");
+  if (s.stage === "TAGS" && can.analyze && !analysisShown) {
+    analysisShown = true;
+    act(() => runAnalyze(true));
+  }
+  if (s.stage !== "TAGS") analysisShown = false;
+  const p = s.probe, c = s.collect;
   if (!control) stateMessage = { text: "조작 기능이 꺼져 있습니다(읽기 전용). 이 장비에서 열거나 --token을 지정해 다시 시작하세요.", warn: true };
   else if (s.error) stateMessage = { text: s.error, warn: false };
-  else if (s.no_data) stateMessage = { text: "30초 넘게 데이터가 들어오지 않습니다. 토픽 이름과 DX1 발행 상태를 확인하세요.", warn: true };
+  else if (c.no_data) stateMessage = { text: "30초 넘게 데이터가 들어오지 않습니다. 토픽 이름과 DX1 발행 상태를 확인하세요.", warn: true };
+  else if (c.ended_reason === "size" && !c.active) stateMessage = { text: "수집이 크기 상한(1GB)에 닿아 자동으로 끝났습니다.", warn: true };
+  else if (c.interrupted) stateMessage = { text: "이전 수집이 중간에 끊겼습니다(앱이 꺼졌을 수 있습니다). 그때까지 모인 데이터는 남아 있습니다.", warn: true };
+  else if (p && p.expired && !p.active) stateMessage = { text: "시험이 5분이 지나 자동으로 끝났습니다.", warn: true };
   else stateMessage = null;
   showBanner();
 }
@@ -212,32 +305,34 @@ async function refresh() {
   showBanner();
 }
 
-$("btn-analyze").onclick = () => act(async () => {
-  renderTags((await api("/api/analyze", { data_dir: $("data_dir").value })).tags);
-});
-$("btn-save").onclick = () => act(() => api("/api/config", {
+$("btn-save-connection").onclick = () => act(() => api("/api/connection", {
   equipment_id: $("equipment_id").value,
   host: $("host").value,
   port: $("port").value,
   subscribe_topics: $("subscribe_topics").value.split(",").map((t) => t.trim()).filter(Boolean),
-  tags: selectedTags(),
-  min_samples: $("min_samples").value,
 }));
+$("btn-probe-start").onclick = () => act(() => api("/api/probe/start", {}));
+$("btn-probe-stop").onclick = () => act(() => api("/api/probe/stop", {}));
+$("btn-collect-start").onclick = () => act(() => api("/api/collect/start", {}));
+$("btn-collect-stop").onclick = () => act(() => api("/api/collect/stop", {}));
+$("btn-discard").onclick = () => act(() => api("/api/collect/discard", {}));
+$("btn-import").onclick = () => act(() => api("/api/collect/import", { data_dir: $("import_dir").value }));
+$("btn-analyze").onclick = () => act(() => runAnalyze(true));
+$("cycle-tag").onchange = () => act(() => runAnalyze(false));
+$("tags").onchange = () => { if (lastState) render(lastState); };
+$("btn-train").onclick = () => act(() => api("/api/train", { tags: selectedTags() }));
 $("btn-start").onclick = () => act(() => api("/api/start", {}));
 $("btn-stop").onclick = () => act(() => api("/api/stop", {}));
-$("btn-train").onclick = () => act(() => api("/api/train", {}));
-$("btn-recalibrate").onclick = () => act(() => api("/api/recalibrate", {}));
-$("btn-discard").onclick = () => act(() => api("/api/recalibrate", {}));
+$("btn-retrain").onclick = () => act(() => api("/api/retrain", {}));
 
 (async function init() {
   try {
-    const form = await api("/api/config");
+    const form = await api("/api/connection");
     if (form.equipment_id) {
       $("equipment_id").value = form.equipment_id;
       $("host").value = form.host;
       $("port").value = form.port;
       $("subscribe_topics").value = form.subscribe_topics.join(", ");
-      $("min_samples").value = form.min_samples;
     }
   } catch (e) { connError = e.message; showBanner(); }
   refresh();
