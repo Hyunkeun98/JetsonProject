@@ -247,8 +247,9 @@ def test_a_recording_shorter_than_three_periods_is_not_estimated():
 
 def test_warning_only_below_ten_cycles_and_it_says_when_the_number_is_an_estimate():
     enough = _feed(CycleCounter(), 1200, U0=lambda i: 1 if i % 100 >= 90 else 0).report()
-    few = _feed(CycleCounter(), 700, U0=lambda i: 1 if i % 100 >= 90 else 0).report()
-    unknown = _feed(CycleCounter(), 100, vel=lambda i: i % 2).report()
+    few = _feed(CycleCounter(), 600, U0=lambda i: 1 if i % 100 >= 90 else 0).report()
+    rng = random.Random(5)
+    unknown = _feed(CycleCounter(), 100, vel=lambda i: rng.uniform(-1, 1)).report()
     estimated = _feed(CycleCounter(), 1800, pos=_ramp).report()
 
     assert CYCLE_TARGET == 10
