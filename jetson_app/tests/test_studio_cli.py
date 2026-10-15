@@ -29,6 +29,23 @@ def test_control_is_disabled_for_a_remote_host_without_a_token():
     assert cli.control_enabled("localhost", None) is True
 
 
+def test_default_port_is_8800(monkeypatch):
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_server(controller, host, port, token, control_enabled):
+        seen["port"] = port
+        raise Stop
+
+    monkeypatch.setattr(cli, "StudioServer", fake_server)
+    monkeypatch.setattr(cli, "StudioController", lambda workspace: object())
+    with pytest.raises(Stop):
+        cli.main(["--workspace", "ignored", "--no-browser"])
+    assert seen["port"] == 8800
+
+
 def test_studio_url_percent_encodes_the_token():
     assert cli.studio_url("127.0.0.1", 8080, "a+b#c") == "http://localhost:8080/?token=a%2Bb%23c"
     assert cli.studio_url("0.0.0.0", 9000, None) == "http://0.0.0.0:9000/"

@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .controller import StudioController
-from .server import LOOPBACK_HOSTS, StudioServer
+from .server import DEFAULT_PORT, LOOPBACK_HOSTS, StudioServer
 
 
 def default_workspace() -> Path:
@@ -33,7 +33,7 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="jetson-studio: 설정, 수집, 학습, 감시를 한 화면에서")
     parser.add_argument("--workspace", help="설정, 수집 데이터, 모델을 저장할 폴더(기본: exe 옆 또는 ./workspace)")
     parser.add_argument("--web-host", default="127.0.0.1", help="화면을 열 주소(기본 127.0.0.1, 이 장비에서만)")
-    parser.add_argument("--web-port", type=int, default=8080)
+    parser.add_argument("--web-port", type=int, default=DEFAULT_PORT, help="화면 포트(기본 8800)")
     parser.add_argument("--token", help="원격(루프백이 아닌 주소)에서 조작하려면 필요한 비밀번호")
     parser.add_argument("--no-browser", action="store_true", help="브라우저를 자동으로 열지 않는다")
     args = parser.parse_args(argv)

@@ -265,7 +265,7 @@ groups:
 터미널과 YAML 편집 없이 브라우저 화면 하나로 "설정 → 정상 데이터 수집 → 학습 → 감시"를 끝낸다. 위치 신호의 충격을 감지하는 기준값 이탈 점수(`deviation`) 전용이다(GRU 설정은 기존 `jetson-app`을 쓴다).
 
 ```bash
-uv run jetson-studio                      # 브라우저가 자동으로 열린다 (http://localhost:8080)
+uv run jetson-studio                      # 브라우저가 자동으로 열린다 (http://localhost:8800)
 dist/jetson-studio/jetson-studio.exe     # Windows 패키지 (아래 "exe 만들기")
 ```
 
@@ -273,7 +273,7 @@ dist/jetson-studio/jetson-studio.exe     # Windows 패키지 (아래 "exe 만들
 |---|---|
 | `--workspace PATH` | 설정, 수집 데이터, 모델을 저장할 폴더. 기본은 exe 옆 또는 현재 폴더의 `workspace/` |
 | `--web-host` | 화면을 열 주소. 기본 `127.0.0.1`(이 장비에서만) |
-| `--web-port` | 포트(기본 8080) |
+| `--web-port` | 포트(기본 8800) |
 | `--token` | 다른 PC에서 조작할 때 필요한 비밀번호 |
 | `--no-browser` | 브라우저를 자동으로 열지 않는다 |
 
@@ -288,7 +288,7 @@ dist/jetson-studio/jetson-studio.exe     # Windows 패키지 (아래 "exe 만들
 
 ```bash
 uv run jetson-studio --web-host 0.0.0.0 --token 비밀번호 --no-browser
-# 다른 PC 브라우저: http://<Jetson IP>:8080/?token=비밀번호
+# 다른 PC 브라우저: http://<Jetson IP>:8800/?token=비밀번호
 ```
 
 루프백(127.0.0.1)이 아닌 주소로 열 때 `--token`이 없으면 조작 기능이 꺼지고 점수만 볼 수 있다(읽기 전용). 모든 조작 요청은 토큰과 출처(Host/Origin)를 확인하고, 파일은 작업 폴더 안에만 쓴다. 부팅 때 자동으로 띄우려면 systemd 서비스로 등록한다.

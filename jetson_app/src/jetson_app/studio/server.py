@@ -14,6 +14,7 @@ from .controller import StudioController
 from .errors import StudioError
 
 MAX_BODY_BYTES = 64 * 1024
+DEFAULT_PORT = 8800  # 8080은 다른 프로그램과 자주 겹쳐서 피한다
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 _STUDIO_PAGE = Path(__file__).resolve().parent.parent / "web" / "studio.html"
 
@@ -29,7 +30,7 @@ class StudioServer:
         self,
         controller: StudioController,
         host: str = "127.0.0.1",
-        port: int = 8080,
+        port: int = DEFAULT_PORT,
         token=None,
         control_enabled: bool = True,
     ) -> None:
