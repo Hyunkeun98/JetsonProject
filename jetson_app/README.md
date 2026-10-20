@@ -10,14 +10,145 @@ Jetson 쪽 실시간 이상탐지 프레임워크의 통신 + 데이터 파이�
 
 ## 필요 환경
 
-- **Jetson**: JetPack 5.x (Ubuntu 20.04, aarch64)
+- **Jetson**: JetPack 5.x (Ubuntu 20.04, aarch64)를 기준으로 적었다. JetPack 6.x(Ubuntu 22.04)도 같은 절차로 될 것으로 보이나 확인하지 못했다.
 - **개발 PC**: uv 설치된 환경 (이 저장소는 여기서 코드를 작성/테스트함)
+- **네트워크**: NX5 데모에서는 MQTT 브로커가 `192.168.250.200`이고 Jetson은 거기에 접속해 구독만 한다. Jetson에 브로커를 따로 설치하지 않아도 된다(1절은 선택).
 
 아래 가이드는 실제 Jetson 하드웨어와 DX1이 있어야 실행 가능한, 사람이 직접 수행하는 단계다.
 
-## 1. Jetson에 MQTT 브로커(Mosquitto) 설치
+## 0. Jetson 실기 세팅 체크리스트 (NX5 데모, jetson-studio 기준)
 
-Jetson 실기의 터미널에서 직접 실행한다.
+Jetson에 처음 전원을 넣고 데모를 돌릴 수 있을 때까지의 순서다. **Jetson 실기에서는 아직 실행해 보지 않았다.** 다만 torch 없이 설치하고 `jetson-studio`를 띄우는 부분(D)은 개발 PC에서 같은 명령으로 확인했다. 실기에서 달라지는 점이 있으면 이 절을 고친다.
+
+### A. 먼저 확인할 것 (아는 값을 적어 둔다)
+
+```bash
+cat /etc/nv_tegra_release                          # JetPack(L4T) 버전
+sudo apt-cache show nvidia-jetpack | grep Version
+python3 --version                                  # 3.8 이상이어야 한다(uv가 필요하면 알아서 내려받는다)
+df -h /                                            # 남은 디스크(수집은 한 번에 최대 1GB, 이전 수집본도 남는다)
+ip -br addr                                        # 네트워크 카드와 IP
+```
+
+| 확인 항목 | 이유 |
+|---|---|
+| Jetson 모델과 JetPack 버전 | GPU용 torch wheel이 JetPack 버전마다 다르다(2-5절, GRU를 쓸 때만) |
+| Jetson이 인터넷에 닿는가 | 처음 설치할 때 GitHub, uv, PyPI에 접속해야 한다. DX1 쪽 `192.168.250.x` 망에 인터넷이 없으면 다른 랜 포트나 Wi-Fi를 임시로 연결한다 |
+| `192.168.250.200`이 무엇인가 | 브로커가 DX1 안에 있는지 별도 장비인지에 따라 점검 위치가 달라진다(문제 시 3절 점검 순서) |
+
+### B. 기본 설정
+
+```bash
+sudo apt update && sudo apt install -y git curl mosquitto-clients   # 브로커(mosquitto)가 아니라 확인용 클라이언트만 설치
+sudo timedatectl set-timezone Asia/Seoul
+sudo timedatectl set-ntp true                                       # 로그 시각용. 분석은 DX1이 붙인 시각을 쓰므로 Jetson 시계와 무관하다
+```
+
+### C. 네트워크 (DX1과 같은 서브넷)
+
+DX1(`192.168.250.200`)과 같은 대역(`192.168.250.x`)에 **겹치지 않는 고정 IP**를 준다. 예시는 `192.168.250.210`이다(실제 값은 네트워크 담당과 정한다).
+
+```bash
+nmcli con show                                                      # 연결 이름 확인
+sudo nmcli con mod "<연결이름>" ipv4.method manual ipv4.addresses 192.168.250.210/24
+sudo nmcli con up "<연결이름>"
+ping -c 3 192.168.250.200                                           # DX1(브로커) 도달 확인
+mosquitto_sub -h 192.168.250.200 -t "dx1/AxisData" -q 1 -C 3 -W 10   # 데이터가 실제로 들어오는지(3건)
+```
+
+- 인터넷도 이 카드로 써야 하면 `ipv4.gateway`와 `ipv4.dns`도 준다. 인터넷용 카드를 따로 쓰면 게이트웨이는 비워 둔다.
+- 방화벽이 켜져 있다면(`sudo ufw status`가 `active`) PC 브라우저에서 화면을 열 포트만 연다: `sudo ufw allow 8800/tcp`.
+
+### D. 앱 설치 (torch 없이)
+
+이 데모는 위치 신호의 기준값 이탈(`deviation`)만 쓰므로 PyTorch가 필요 없다. torch는 크고 오래 걸리니 빼고 설치한다.
+
+```bash
+git clone https://github.com/Hyunkeun98/JetsonProject.git
+cd JetsonProject/jetson_app
+curl -LsSf https://astral.sh/uv/install.sh | sh && source $HOME/.local/bin/env
+uv sync --no-install-package torch
+uv run --no-sync jetson-studio --help          # 도움말이 나오면 설치 성공
+```
+
+- `uv run`은 기본적으로 빠진 패키지를 다시 맞추므로 torch가 설치돼 버린다. **실행할 때는 `--no-sync`를 붙인다.**
+- GRU 기능(`jetson-app`의 `train` 명령 등)까지 쓸 때만 torch가 필요하다. 그때는 `uv sync`(2-3절)와 GPU용 교체(2-5절)를 한다.
+
+### E. 첫 실행과 확인
+
+```bash
+uv run --no-sync jetson-studio --web-host 0.0.0.0 --token 정한비밀번호 --no-browser --workspace ~/studio_workspace
+```
+
+1. 같은 망의 PC 브라우저에서 `http://<Jetson IP>:8800/?token=정한비밀번호`를 연다. 주소에 `?token=`이 없으면 화면은 열리지만 조작 요청이 거부된다.
+2. **1단계 연결**: 호스트 `192.168.250.200`, 포트 `1883`, 토픽 `dx1/AxisData, dx1/ProcStart`.
+3. **2단계 살펴보기**: "시험 시작"에서 수신 건수가 늘고 숫자 태그가 9개(AxisData 기준: 축 3개 × 위치·속도·토크) 보이면 연결은 끝이다.
+4. 그 뒤는 "jetson-studio" 절의 3~6단계를 따른다.
+
+### F. 부팅 때 자동으로 띄우기 (systemd)
+
+아래의 `jetson`(사용자 이름)과 경로는 실제 값으로 바꾼다. `uv`가 아니라 가상환경의 실행 파일을 직접 부르므로 부팅 때 인터넷 없이도 뜬다.
+
+```bash
+sudo tee /etc/systemd/system/jetson-studio.service > /dev/null <<'EOF'
+[Unit]
+Description=jetson-studio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=jetson
+WorkingDirectory=/home/jetson/JetsonProject/jetson_app
+ExecStart=/home/jetson/JetsonProject/jetson_app/.venv/bin/jetson-studio --web-host 0.0.0.0 --token 정한비밀번호 --no-browser --workspace /home/jetson/studio_workspace
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now jetson-studio
+systemctl status jetson-studio --no-pager        # active (running)이면 정상
+journalctl -u jetson-studio -n 50 --no-pager     # 문제가 있으면 여기서 이유를 본다
+```
+
+재부팅한 뒤 `http://<Jetson IP>:8800/?token=...`이 다시 열리는지 한 번 확인한다. 감시 중이던 모델은 `workspace`에 남아 있어 앱이 다시 뜨면 6단계에서 "감시 시작"만 누르면 된다.
+
+### G. Jetson에 모니터를 연결해 시연할 때
+
+- 화면 꺼짐과 잠금을 끈다(데모 도중 꺼지면 안 된다): 설정의 Power/Privacy에서 화면 끄기 `안 함`, 자동 잠금 `끔`.
+- 브라우저를 전체 화면(kiosk)으로 띄운다. 예: `firefox --kiosk http://localhost:8800/` (설치된 브라우저에 맞춰 바꾼다). 로그인할 때마다 자동으로 띄우려면 `~/.config/autostart/`에 `.desktop` 파일을 둔다.
+- 서버를 `--token`으로 띄웠다면 같은 장비에서 `localhost`로 열 때도 `?token=정한비밀번호`를 붙인 주소를 써야 조작이 된다(예: `firefox --kiosk "http://localhost:8800/?token=정한비밀번호"`). 토큰은 한 번 열면 그 탭에 기억된다.
+
+### H. 성능과 전원 (선택)
+
+- `deviation`만 쓰면 기본 전원 모드로 충분하다(`sudo nvpmodel -q`로 현재 모드 확인).
+- GRU 학습처럼 무거운 일을 Jetson에서 할 때만 최대 성능을 쓴다: `sudo nvpmodel -m 0 && sudo jetson_clocks`(발열과 소비 전력이 늘어난다).
+
+### I. PC에서 학습한 결과를 옮기기 (선택, 미확인)
+
+학습 결과(`workspace/models/*.deviation.json`, `*.state`)와 설정(`workspace/configs/*.yaml`, `studio.json`)은 JSON/텍스트라서 PC에서 학습한 `workspace`를 Jetson으로 복사해도 감시가 될 것으로 보인다. **실기에서는 확인하지 못했다.** 확실한 방법은 Jetson에서 직접 수집 → 학습하는 것이다(1시간 수집, 학습은 수 초~수 분).
+
+### J. 세팅이 끝났는지 확인하는 목록
+
+- [ ] `ping 192.168.250.200`이 응답한다
+- [ ] `mosquitto_sub -h 192.168.250.200 -t dx1/AxisData -C 3`이 3건을 받는다
+- [ ] `uv run --no-sync jetson-studio --help`가 나온다
+- [ ] PC 브라우저로 `http://<Jetson IP>:8800/?token=...`이 열린다
+- [ ] 화면 2단계 "시험 시작"에서 수신 건수가 늘고 숫자 태그가 보인다
+- [ ] 재부팅 후 `systemctl status jetson-studio`가 `active (running)`이다
+- [ ] 정상 워크로 20사이클 수집 → 태그 추천 → 학습 → 감시가 한 번 끝까지 된다
+
+### K. 알아 둘 점
+
+- 화면에는 브로커 아이디·비밀번호 입력칸이 없다. 지금 브로커는 익명 접속이 전제다.
+- 수집은 한 번에 최대 1GB이고 새로 수집하면 이전 수집본이 `workspace/collections/<장비>/archive/`에 쌓인다. 디스크가 부족해지면 오래된 archive를 지운다.
+- `--token`을 주지 않고 `--web-host 0.0.0.0`으로 열면 조작이 꺼진다. 같은 망의 다른 사람이 화면을 조작하지 못하게 하려면 비밀번호를 쓴다.
+- 학습과 감시는 DX1이 데이터에 붙인 시각만 쓰므로 Jetson과 DX1의 시계가 달라도 결과는 같다. 화면에 보이는 알람 시각은 DX1 시계 기준이다.
+
+## 1. (선택) Jetson에 MQTT 브로커(Mosquitto) 설치
+
+**브로커를 Jetson에 둘 때만 한다.** NX5 데모처럼 브로커가 이미 `192.168.250.200`에 있으면 건너뛴다(0절). Jetson 실기의 터미널에서 직접 실행한다.
 
 ### 1-1. 설치
 
@@ -108,7 +239,8 @@ source $HOME/.local/bin/env
 ### 2-3. 의존성 설치
 
 ```bash
-uv sync
+uv sync                              # GRU(jetson-app의 train 등)까지 쓸 때: torch 포함
+uv sync --no-install-package torch   # jetson-studio(deviation)만 쓸 때: torch 제외. 실행은 uv run --no-sync ... (0절 D)
 ```
 
 ### 2-4. 설비 config 준비
@@ -295,16 +427,9 @@ uv run jetson-studio --web-host 0.0.0.0 --token 비밀번호 --no-browser
 # 다른 PC 브라우저: http://<Jetson IP>:8800/?token=비밀번호
 ```
 
-루프백(127.0.0.1)이 아닌 주소로 열 때 `--token`이 없으면 조작 기능이 꺼지고 점수만 볼 수 있다(읽기 전용). 모든 조작 요청은 토큰과 출처(Host/Origin)를 확인하고, 파일은 작업 폴더 안에만 쓴다. 부팅 때 자동으로 띄우려면 systemd 서비스로 등록한다.
+루프백(127.0.0.1)이 아닌 주소로 열 때 `--token`이 없으면 조작 기능이 꺼지고 점수만 볼 수 있다(읽기 전용). 모든 조작 요청은 토큰과 출처(Host/Origin)를 확인하고, 파일은 작업 폴더 안에만 쓴다. Jetson에서 처음 설치하는 순서와 부팅 때 자동으로 띄우는 방법(systemd)은 위 0절을 따른다.
 
-```ini
-[Service]
-WorkingDirectory=/home/jetson/jetson_app
-ExecStart=/home/jetson/.local/bin/uv run jetson-studio --web-host 0.0.0.0 --token CHANGE_ME --no-browser
-Restart=on-failure
-```
-
-**exe 만들기(Windows):** `powershell -ExecutionPolicy Bypass -File packaging/build_exe.ps1` → `dist/jetson-studio/jetson-studio.exe`(약 15MB, torch 미포함). 폴더째 복사해서 쓴다.
+**exe 만들기(Windows):** `powershell -ExecutionPolicy Bypass -File packaging/build_exe.ps1` → `dist/jetson-studio/jetson-studio.exe`(약 15MB, torch 미포함). 폴더째 복사해서 쓴다. 실행 중인 exe가 있으면 `dist`를 지우지 못해 실패하니, 먼저 끄거나 `-DistPath`로 다른 폴더에 만든다. exe는 Windows 전용이라 Jetson에서는 쓰지 않는다.
 
 **지금의 한계:** `deviation` 전용이다. 수집 중 이상 구간을 시간으로 골라 빼는 기능은 없어서 섞였다면 지우고 다시 모은다. 브로커 아이디·비밀번호 입력칸이 없다. 주기 추정(D)은 불규칙한 사이클에서 틀릴 수 있다. 재생으로 확인했을 때(run3 수집 → run4 감시) 기존 실험과 같은 9건 중 7건 검출이었고, 약한 충격 2건은 놓친다.
 

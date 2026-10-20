@@ -163,7 +163,7 @@ DX1 ──MQTT JSON──▶ mqtt_subscriber ──▶ EventTimeResampler ──
 3. 장비 정지 상태 처리 방침 결정과 반영(정지 상태 학습 또는 감시 제외).
 4. 서보 오탐이 몰린 대기 구간의 기준 폭(`_floor_std`) 점검.
 5. 실제 MQTT로 `--web-port` 동작 확인, 좁은 화면 레이아웃 확인.
-6. Jetson 실기에서 학습 시간 측정.
+6. Jetson 실기에서 README 0절 세팅 체크리스트를 실행해 보고(고정 IP, torch 없이 설치, systemd 자동 시작), 학습 시간 측정.
 7. replay/threshold/dashboard 독립 코드 리뷰.
 8. studio 확장: GRU 설정 화면, 재생 검증 탭, 수집 중 이상 구간 제외, 브로커 인증 입력, 수집 시간·사이클 수 도달 시 자동 종료.
 9. 자동 시작/상태 확인 명령, PLC/표시 연동.
