@@ -12,7 +12,7 @@ Jetson 쪽 실시간 이상탐지 프레임워크의 통신 + 데이터 파이�
 
 - **Jetson**: JetPack 5.x (Ubuntu 20.04, aarch64)를 기준으로 적었다. JetPack 6.x(Ubuntu 22.04)도 같은 절차로 될 것으로 보이나 확인하지 못했다.
 - **개발 PC**: uv 설치된 환경 (이 저장소는 여기서 코드를 작성/테스트함)
-- **네트워크**: NX5 데모에서는 MQTT 브로커가 `192.168.250.200`이고 Jetson은 거기에 접속해 구독만 한다. Jetson에 브로커를 따로 설치하지 않아도 된다(1절은 선택).
+- **네트워크**: 개발·검증 중에는 PC가 기존 MQTT 브로커 `192.168.250.200`에서 데이터를 받는다. 배포할 때는 **Jetson에 Mosquitto 브로커를 설치**하고 DX1(SpeeDBee Synapse)의 MQTT Emitter가 Jetson으로 발행하게 한다(1절, 3절). 그러면 Jetson의 앱은 같은 장비의 브로커(`localhost`)를 구독한다.
 
 아래 가이드는 실제 Jetson 하드웨어와 DX1이 있어야 실행 가능한, 사람이 직접 수행하는 단계다.
 
@@ -34,12 +34,12 @@ ip -br addr                                        # 네트워크 카드와 IP
 |---|---|
 | Jetson 모델과 JetPack 버전 | GPU용 torch wheel이 JetPack 버전마다 다르다(2-5절, GRU를 쓸 때만) |
 | Jetson이 인터넷에 닿는가 | 처음 설치할 때 GitHub, uv, PyPI에 접속해야 한다. DX1 쪽 `192.168.250.x` 망에 인터넷이 없으면 다른 랜 포트나 Wi-Fi를 임시로 연결한다 |
-| `192.168.250.200`이 무엇인가 | 브로커가 DX1 안에 있는지 별도 장비인지에 따라 점검 위치가 달라진다(문제 시 3절 점검 순서) |
+| `192.168.250.200`이 무엇인가 | 지금 개발·검증에서 데이터를 받는 브로커다. 배포 후에는 DX1이 Jetson 브로커로 발행하도록 DX1 설정(3절)을 바꾼다. 검증을 이어가는 동안 두 곳에 함께 발행할 수 있는지 DX1 담당에게 확인해 둔다 |
 
 ### B. 기본 설정
 
 ```bash
-sudo apt update && sudo apt install -y git curl mosquitto-clients   # 브로커(mosquitto)가 아니라 확인용 클라이언트만 설치
+sudo apt update && sudo apt install -y git curl mosquitto mosquitto-clients   # 브로커 설정은 1절에서 한다
 sudo timedatectl set-timezone Asia/Seoul
 sudo timedatectl set-ntp true                                       # 로그 시각용. 분석은 DX1이 붙인 시각을 쓰므로 Jetson 시계와 무관하다
 ```
@@ -81,7 +81,7 @@ uv run --no-sync jetson-studio --web-host 0.0.0.0 --token 정한비밀번호 --n
 ```
 
 1. 같은 망의 PC 브라우저에서 `http://<Jetson IP>:8800/?token=정한비밀번호`를 연다. 주소에 `?token=`이 없으면 화면은 열리지만 조작 요청이 거부된다.
-2. **1단계 연결**: 호스트 `192.168.250.200`, 포트 `1883`, 토픽 `dx1/AxisData, dx1/ProcStart`.
+2. **1단계 연결**: 호스트 `localhost`(브로커가 Jetson에 있을 때. DX1이 아직 Jetson으로 발행하지 않는 검증 중에는 `192.168.250.200`), 포트 `1883`, 토픽 `dx1/AxisData, dx1/ProcStart`.
 3. **2단계 살펴보기**: "시험 시작"에서 수신 건수가 늘고 숫자 태그가 9개(AxisData 기준: 축 3개 × 위치·속도·토크) 보이면 연결은 끝이다.
 4. 그 뒤는 "jetson-studio" 절의 3~6단계를 따른다.
 
@@ -132,7 +132,8 @@ journalctl -u jetson-studio -n 50 --no-pager     # 문제가 있으면 여기서
 ### J. 세팅이 끝났는지 확인하는 목록
 
 - [ ] `ping 192.168.250.200`이 응답한다
-- [ ] `mosquitto_sub -h 192.168.250.200 -t dx1/AxisData -C 3`이 3건을 받는다
+- [ ] 배포 전: `mosquitto_sub -h 192.168.250.200 -t dx1/AxisData -C 3`이 3건을 받는다
+- [ ] Jetson 브로커: `systemctl status mosquitto`가 `active (running)`이고, DX1 설정을 바꾼 뒤 `mosquitto_sub -h localhost -t dx1/AxisData -C 3`이 3건을 받는다
 - [ ] `uv run --no-sync jetson-studio --help`가 나온다
 - [ ] PC 브라우저로 `http://<Jetson IP>:8800/?token=...`이 열린다
 - [ ] 화면 2단계 "시험 시작"에서 수신 건수가 늘고 숫자 태그가 보인다
@@ -146,9 +147,9 @@ journalctl -u jetson-studio -n 50 --no-pager     # 문제가 있으면 여기서
 - `--token`을 주지 않고 `--web-host 0.0.0.0`으로 열면 조작이 꺼진다. 같은 망의 다른 사람이 화면을 조작하지 못하게 하려면 비밀번호를 쓴다.
 - 학습과 감시는 DX1이 데이터에 붙인 시각만 쓰므로 Jetson과 DX1의 시계가 달라도 결과는 같다. 화면에 보이는 알람 시각은 DX1 시계 기준이다.
 
-## 1. (선택) Jetson에 MQTT 브로커(Mosquitto) 설치
+## 1. Jetson에 MQTT 브로커(Mosquitto) 설치
 
-**브로커를 Jetson에 둘 때만 한다.** NX5 데모처럼 브로커가 이미 `192.168.250.200`에 있으면 건너뛴다(0절). Jetson 실기의 터미널에서 직접 실행한다.
+**배포할 때 필요하다.** DX1이 Jetson의 브로커로 데이터를 발행하고 Jetson의 앱이 그것을 구독한다. 개발·검증 중에는 기존 브로커(`192.168.250.200`)를 써도 되므로, 이 절은 Jetson에 인터넷이 연결된 지금 미리 해 두면 된다. Jetson 실기의 터미널에서 직접 실행한다.
 
 ### 1-1. 설치
 

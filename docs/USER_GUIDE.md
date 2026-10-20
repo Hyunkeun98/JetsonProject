@@ -61,7 +61,7 @@
 
 ### 단계 1. Jetson 설치 (처음 한 번)
 
-> **지금 NX5 데모는 브로커가 `192.168.250.200`에 있어서 아래 1~2번(브로커 설치)은 건너뜁니다.** Jetson 세팅의 최신 순서(고정 IP, torch 없이 설치, 화면 실행, 부팅 때 자동 시작)는 [`jetson_app/README.md`](../jetson_app/README.md)의 "0. Jetson 실기 세팅 체크리스트"를 따르세요. 화면(`jetson-studio`)으로 하는 방법은 같은 README의 "jetson-studio" 절에 있습니다.
+> Jetson 세팅의 최신 순서(고정 IP, torch 없이 설치, 화면 실행, 부팅 때 자동 시작)는 [`jetson_app/README.md`](../jetson_app/README.md)의 "0. Jetson 실기 세팅 체크리스트"를 따르세요. **브로커(Mosquitto)는 Jetson에 설치합니다**(아래 1~2번). 화면(`jetson-studio`)으로 하는 방법은 같은 README의 "jetson-studio" 절에 있습니다.
 
 1. 브로커(Mosquitto)를 설치합니다.
    ```bash
